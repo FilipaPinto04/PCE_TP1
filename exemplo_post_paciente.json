@@ -1,0 +1,29 @@
+{
+    "nome": "António Chaves",
+    "genero": "m",
+    "telecom": [
+        {
+            "tipo": "telemóvel",
+            "valor": "927895461"
+        },
+        {
+            "tipo": "email",
+            "valor": "antonio.chaves@mail.com"
+        }
+    ],
+    "contacto": [
+        {
+            "nome": "Maria",
+            "telecom": [
+                {
+                    "tipo": "telemóvel",
+                    "valor": "927895461"
+                }
+            ],
+            "endereco": [{
+                "tipo": "casa",
+                "valor": "Rua da Universidade, 25"
+            }]
+        }
+    ]
+}

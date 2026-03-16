@@ -1,0 +1,21 @@
+{
+  "estado": "final",
+  "codigo": {
+    "coding": [
+      {
+        "system": "http://loinc.org",
+        "code": "59408-5",
+        "display": "Oxygen saturation"
+      }
+    ],
+    "text": "Oxygen saturation"
+  },
+  "reference": "Patient/89980748",
+  "dataExecucao": "2026-02-10T03:54:00Z",
+  "medicao": {
+    "valor": 97,
+    "unidade": "%",
+    "sistema": "http://unitsofmeasure.org",
+    "code": "%"
+  }
+}

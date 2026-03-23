@@ -1,0 +1,25 @@
+version: "3.7"
+
+services:
+  fhir:
+    image: hapiproject/hapi:latest
+    container_name: hapi-fhir
+    ports:
+      - "9000:8080"
+    depends_on:
+      - db
+    volumes:
+      - ./hapi.application.yaml:/app/config/application.yaml:ro
+
+  db:
+    image: postgres:16
+    container_name: hapi-postgres
+    environment:
+      POSTGRES_DB: hapi
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+    volumes:
+      - hapi_pgdata:/var/lib/postgresql/data
+
+volumes:
+  hapi_pgdata:

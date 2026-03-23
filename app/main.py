@@ -1,41 +1,66 @@
+import psycopg2
+import requests
 from fastapi import FastAPI, HTTPException
-import database  
+from psycopg2.extras import RealDictCursor
+import os
 
 app = FastAPI()
 
-# 1. GET Patient por ID 
-@app.get("/Patient/{patient_id}")
-async def read_patient(patient_id: int):
-    # Vai à BD buscar os dados da tabela SQL
-    patient_data = database.get_patient_from_sql(patient_id)
-    if not patient_data:
-        raise HTTPException(status_code=404, detail="Patient not found")
-    
+def get_db_connection():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=5432,
+        database="tp1",
+        user="admin",
+        password="admin"
+    )
 
-    return {
-        "resourceType": "Patient",
-        "id": str(patient_data["id"]),
-        "name": [{"family": patient_data["apelido"], "given": [patient_data["nome"]]}]
-    }
-
-# 2. POST Patient (Criar novo) 
 @app.post("/Patient")
-async def create_patient(patient_fhir: dict):
-    nome = patient_fhir['name'][0]['given'][0]
-    apelido = patient_fhir['name'][0]['family']
-    
-    new_id = database.insert_patient_sql(nome, apelido)
-    return {"message": "Paciente criado", "id": new_id}
+async def create_patient(data: dict):
+    conn = None
+    try:
+        nome_completo = data.get('nome', 'Sem Nome')
+        genero = data.get('genero', 'unknown')
+        tipo_telecom = data.get('telecom/tipo') #FALTA
+        valor_telecom = data.get('telecom/valor') #FALTA
 
-# 3. GET Observation por ID de Paciente 
-@app.get("/Observation")
-async def read_observations(patient: str):
-    obs_list = database.get_observations_by_patient(patient)
-    
-    return {
-        "resourceType": "Bundle",
-        "entry": [
-            {"resource": {"resourceType": "Observation", "valueQuantity": {"value": o['valor']}}} 
-            for o in obs_list
-        ]
-    }
+        # --- PASSO A: GUARDAR NO POSTGRES ---
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:  # <-- aqui
+            cur.execute(
+                "INSERT INTO patients (nome, genero) VALUES (%s, %s) RETURNING id",
+                (nome_completo, genero)
+            )
+            cur.execute(
+                "INSERT INTO telecom (tipo, valor) VALUES (%s, %s) RETURNING id",
+                (tipo_telecom, valor_telecom)
+            )
+            sql_id = cur.fetchone()['id']
+            conn.commit()
+
+        # --- PASSO B: MANDAR PARA O HAPI ---
+        fhir_payload = {
+            "resourceType": "Patient",
+            "name": [{"given": [nome_completo]}],
+            "gender": "male" if genero == "m" else "female" if genero == "f" else "unknown"
+        }
+
+        hapi_url = os.getenv("HAPI_URL", "http://localhost:8080/fhir/Patient")  # <-- aqui
+
+        try:
+            hapi_res = requests.post(hapi_url, json=fhir_payload, timeout=5)
+            hapi_status = hapi_res.status_code
+        except:
+            hapi_status = "HAPI offline"
+
+        return {
+            "mensagem": "Processado com sucesso",
+            "sql_id": sql_id,
+            "hapi_server_status": hapi_status
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+    finally:
+        if conn:
+            conn.close()

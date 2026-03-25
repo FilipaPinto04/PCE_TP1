@@ -17,7 +17,7 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: hapi
+      POSTGRES_DB: tp1
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin
     volumes:

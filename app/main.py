@@ -151,3 +151,99 @@ async def create_patient(data: dict):
     finally:
         if conn:
             conn.close()
+
+@app.post("/Observation")
+async def create_observation(data: dict):
+    conn = None
+    try:
+        # Extração do ID numérico a partir da string "Patient/89980748"
+        refer_string = data.get('refer', '')
+        paciente_id = int(refer_string.split('/')[-1]) if '/' in refer_string else None
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            
+            # 1. Tabela: observacoes
+            cur.execute(
+                """INSERT INTO observacoes (paciente_id, estado, refer, dataExecucao) 
+                   VALUES (%s, %s, %s, %s) RETURNING id""",
+                (paciente_id, data.get('estado'), refer_string, data.get('dataExecucao'))
+            )
+            obs_id = cur.fetchone()['id']
+
+            # 2. Tabela: codigo
+            obj_codigo = data.get('codigo', {})
+            cur.execute(
+                "INSERT INTO codigo (observacoes_id, text) VALUES (%s, %s) RETURNING id",
+                (obs_id, obj_codigo.get('text'))
+            )
+            codigo_id = cur.fetchone()['id']
+
+            # 3. Tabela: coding (Iteração sobre o array)
+            for item in obj_codigo.get('coding', []):
+                cur.execute(
+                    """INSERT INTO coding (codigo_id, system, cod, disp) 
+                       VALUES (%s, %s, %s, %s)""",
+                    (codigo_id, item.get('system'), item.get('cod'), item.get('disp'))
+                )
+
+            # 4. Tabela: medicao
+            m = data.get('medicao', {})
+            cur.execute(
+                """INSERT INTO medicao (observacoes_id, valor, unidade, sistema, cod) 
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (obs_id, m.get('valor'), m.get('unidade'), m.get('sistema'), m.get('cod'))
+            )
+
+            conn.commit()
+
+# --- PASSO B: MANDAR PARA O HAPI (FHIR) ---
+
+        # 1. Preparar a lista de códigos (coding)
+        lista_codigos = []
+        for c in obj_codigo.get('coding', []):
+            lista_codigos.append({
+                "system": c.get('system'),
+                "code": c.get('cod'),      # O HAPI exige a chave 'code'
+                "display": c.get('disp')    # O HAPI exige a chave 'display'
+            })
+
+        # 2. Preparar os dados da medição
+        dados_medicao = {
+            "value": m.get('valor'),
+            "unit": m.get('unidade'),
+            "system": m.get('sistema'),
+            "code": m.get('cod')
+        }
+
+        # 3. Montar o JSON final para o Servidor HAPI
+        fhir_payload = {
+            "resourceType": "Observation",
+            "status": data.get('estado'),
+            "subject": {"reference": refer_string},
+            "effectiveDateTime": data.get('dataExecucao'),
+            "code": {
+                "coding": lista_codigos,
+                "text": obj_codigo.get('text')
+            },
+            "valueQuantity": dados_medicao  # Aqui a chave tem de ser esta para o HAPI entender
+        }
+
+        hapi_url = os.getenv("HAPI_URL", "http://localhost:8080/fhir/Observation")
+        try:
+            hapi_res = requests.post(hapi_url, json=fhir_payload, timeout=5)
+            hapi_status = hapi_res.status_code
+        except Exception:
+            hapi_status = "HAPI offline"
+
+        return {
+            "status": "sucesso",
+            "db_id": obs_id,
+            "hapi_status": hapi_status
+        }
+
+    except Exception as e:
+        if conn: conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro no servidor: {str(e)}")
+    finally:
+        if conn: conn.close()

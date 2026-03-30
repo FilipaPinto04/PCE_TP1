@@ -247,3 +247,71 @@ async def create_observation(data: dict):
         raise HTTPException(status_code=500, detail=f"Erro no servidor: {str(e)}")
     finally:
         if conn: conn.close()
+
+@app.get("/Patient/{patient_id}")
+async def get_patient(patient_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Buscar dados básicos do paciente
+            cur.execute("SELECT * FROM patients WHERE id = %s", (patient_id,))
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Paciente não encontrado")
+
+            # 2. Buscar Telecoms do Paciente
+            cur.execute("SELECT tipo, valor FROM telecom WHERE paciente_id = %s", (patient_id,))
+            patient['telecom'] = cur.fetchall()
+
+            # 3. Buscar Contactos e os seus detalhes (Telecom e Endereço)
+            cur.execute("SELECT id, nome FROM contacto WHERE paciente_id = %s", (patient_id,))
+            contactos = cur.fetchall()
+            
+            for con in contactos:
+                # Telecoms do contacto
+                cur.execute("SELECT tipo, valor FROM telecom WHERE contacto_id = %s", (con['id'],))
+                con['telecom'] = cur.fetchall()
+                # Endereços do contacto
+                cur.execute("SELECT tipo, valor FROM endereco WHERE contacto_id = %s", (con['id'],))
+                con['endereco'] = cur.fetchall()
+            
+            patient['contacto'] = contactos
+            return patient
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn: conn.close()
+
+    
+@app.get("/Observation/{observation_id}")
+async def get_observation(observation_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Buscar a observação base
+            cur.execute("SELECT * FROM observacoes WHERE id = %s", (observation_id,))
+            obs = cur.fetchone()
+            if not obs:
+                raise HTTPException(status_code=404, detail="Observação não encontrada")
+
+            # 2. Buscar o Código (text e coding)
+            cur.execute("SELECT id, text FROM codigo WHERE observacoes_id = %s", (observation_id,))
+            codigo_obj = cur.fetchone()
+            if codigo_obj:
+                cur.execute("SELECT system, cod, disp FROM coding WHERE codigo_id = %s", (codigo_obj['id'],))
+                codigo_obj['coding'] = cur.fetchall()
+                obs['codigo'] = codigo_obj
+
+            # 3. Buscar a Medição
+            cur.execute("SELECT valor, unidade, sistema, cod FROM medicao WHERE observacoes_id = %s", (observation_id,))
+            obs['medicao'] = cur.fetchone()
+
+            return obs
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn: conn.close()

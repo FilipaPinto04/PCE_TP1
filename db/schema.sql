@@ -2,6 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS patients (
     id SERIAL PRIMARY KEY,
+    fhir_id VARCHAR(50),
     nome VARCHAR(255) NOT NULL,
     genero CHAR(1)
 );
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS endereco (
 
 CREATE TABLE IF NOT EXISTS observacoes (
     id SERIAL PRIMARY KEY,
+    fhir_id VARCHAR(50),
     paciente_id INT REFERENCES patients(id) ON DELETE CASCADE,
     estado VARCHAR(50),
     refer Varchar(70),

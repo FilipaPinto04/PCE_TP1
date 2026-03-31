@@ -1,6 +1,6 @@
 spring:
   datasource:
-    url: "jdbc:postgresql://db:5432/hapi"
+    url: "jdbc:postgresql://db:5432/tp1"
     username: admin
     password: admin
     driverClassName: org.postgresql.Driver

@@ -48,71 +48,70 @@ async def startup_event():
 async def create_patient(data: dict):
     conn = None
     try:
-        # Extrair dados base para usar mais tarde no FHIR
+        # Extrair dados base
         nome_paciente = data.get('nome', 'Sem Nome')
         genero_raw = data.get('genero', 'unknown')
 
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # --- 1. Inserir Paciente (António) ---
+        # Usamos um cursor que persiste para todas as operações desta função
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # --- 1. Inserir Paciente (António) ---
+        cur.execute(
+            "INSERT INTO patients (nome, genero) VALUES (%s, %s) RETURNING id",
+            (nome_paciente, genero_raw)
+        )
+        paciente_id = cur.fetchone()['id']
+
+        # --- 2. Inserir Telecoms do Paciente ---
+        for tel in data.get('telecom', []):
             cur.execute(
-                "INSERT INTO patients (nome, genero) VALUES (%s, %s) RETURNING id",
-                (nome_paciente, genero_raw)
+                "INSERT INTO telecom (paciente_id, tipo, valor) VALUES (%s, %s, %s)",
+                (paciente_id, tel.get('tipo'), tel.get('valor'))
             )
-            paciente_id = cur.fetchone()['id']
 
-            # --- 2. Inserir Telecoms do Paciente ---
-            for tel in data.get('telecom', []):
+        # --- 3. Inserir Contactos (Maria) ---
+        for con in data.get('contacto', []):
+            cur.execute(
+                "INSERT INTO contacto (paciente_id, nome) VALUES (%s, %s) RETURNING id",
+                (paciente_id, con.get('nome'))
+            )
+            contacto_id = cur.fetchone()['id']
+
+            # Telecoms da Maria
+            for tel_con in con.get('telecom', []):
                 cur.execute(
-                    "INSERT INTO telecom (paciente_id, tipo, valor) VALUES (%s, %s, %s)",
-                    (paciente_id, tel.get('tipo'), tel.get('valor'))
+                    "INSERT INTO telecom (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
+                    (contacto_id, tel_con.get('tipo'), tel_con.get('valor'))
+                )
+            
+            # Endereços da Maria
+            for end in con.get('endereco', []):
+                cur.execute(
+                    "INSERT INTO endereco (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
+                    (contacto_id, end.get('tipo'), end.get('valor'))
                 )
 
-            # --- 3. Inserir Contactos (Maria) ---
-            for con in data.get('contacto', []):
-                cur.execute(
-                    "INSERT INTO contacto (paciente_id, nome) VALUES (%s, %s) RETURNING id",
-                    (paciente_id, con.get('nome'))
-                )
-                contacto_id = cur.fetchone()['id']
-
-                # Telecoms da Maria
-                for tel_con in con.get('telecom', []):
-                    cur.execute(
-                        "INSERT INTO telecom (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
-                        (contacto_id, tel_con.get('tipo'), tel_con.get('valor'))
-                    )
-                
-                # Endereços da Maria
-                for end in con.get('endereco', []):
-                    cur.execute(
-                        "INSERT INTO endereco (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
-                        (contacto_id, end.get('tipo'), end.get('valor'))
-                    )
-
-            conn.commit()
+        # Commit inicial para garantir que o paciente existe antes do HAPI ser chamado
+        conn.commit()
 
         # --- PASSO B: MANDAR PARA O HAPI (FHIR) ---
 
-        # 1. Mapear Telecoms do Paciente
-        fhir_telecoms = []
-        for t in data.get('telecom', []):
-            sistema = "phone" if t.get('tipo') == "telemóvel" else "email"
-            fhir_telecoms.append({"system": sistema, "value": t.get('valor')})
+        fhir_telecoms = [
+            {"system": "phone" if t.get('tipo') == "telemóvel" else "email", "value": t.get('valor')}
+            for t in data.get('telecom', [])
+        ]
 
-        # 2. Mapear Contactos de Emergência
         fhir_contacts = []
         for con in data.get('contacto', []):
             con_telecoms = [
                 {"system": "phone" if tc.get('tipo') == "telemóvel" else "email", "value": tc.get('valor')}
                 for tc in con.get('telecom', [])
             ]
-            
             con_addresses = [
                 {"use": "home" if addr.get('tipo') == "casa" else "work", "line": [addr.get('valor')]}
                 for addr in con.get('endereco', [])
             ]
-
             fhir_contacts.append({
                 "relationship": [{"text": "Emergency Contact"}],
                 "name": {"family": con.get('nome')},
@@ -120,7 +119,6 @@ async def create_patient(data: dict):
                 "address": con_addresses
             })
 
-        # 3. Montar o Recurso Patient Final (Corrigido keys FHIR)
         fhir_payload = {
             "resourceType": "Patient",
             "name": [{"text": nome_paciente}],
@@ -129,189 +127,266 @@ async def create_patient(data: dict):
             "contact": fhir_contacts
         }
 
-        # 4. Envio para o Servidor HAPI
-        hapi_url = os.getenv("HAPI_URL", "http://localhost:8080/fhir/Patient")
+        hapi_url = "http://localhost:9000/fhir/Patient"
+        headers = {
+                "Content-Type": "application/fhir+json;charset=utf-8",
+                "Accept": "application/fhir+json;charset=utf-8"
+            }
         try:
-            hapi_res = requests.post(hapi_url, json=fhir_payload, timeout=5)
-            hapi_status = hapi_res.status_code
-        except Exception as req_err:
-            print(f"Erro na ligação ao HAPI: {req_err}")
-            hapi_status = "HAPI offline"
-
-        return {
-            "mensagem": "Processado com sucesso",
-            "sql_id": paciente_id,
-            "hapi_server_status": hapi_status
-        }
+            # Enviamos para a porta 9000
+            hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=5)
+            
+            if hapi_res.status_code in [200, 201]:
+                # Extrair ID
+                fhir_id_gerado = hapi_res.json().get('id')
+                
+                # UPDATE NO SQL (para deixar de estar [null])
+                cur.execute(
+                    "UPDATE patients SET fhir_id = %s WHERE id = %s",
+                    (str(fhir_id_gerado), paciente_id)
+                )
+                conn.commit() # Grava a alteração
+                
+                return {
+                    "mensagem": "Sincronizado com Sucesso!",
+                    "id_local": paciente_id,
+                    "id_fhir": fhir_id_gerado
+                }
+            else:
+                # Se der erro, vamos ver o que o HAPI diz na consola
+                print(f"Erro HAPI ({hapi_res.status_code}): {hapi_res.text}")
+                return {
+                    "mensagem": "Erro no HAPI",
+                    "status": hapi_res.status_code,
+                    "detalhe": hapi_res.text[:100]
+                }
+        except Exception as e:
+            return {"mensagem": "HAPI Incontactável na porta 9000", "erro": str(e)}
 
     except Exception as e:
         if conn: conn.rollback()
-        print(f"Erro detetado: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro no processamento: {str(e)}")
     finally:
-        if conn:
+        if conn: 
+            cur.close()
             conn.close()
 
 @app.post("/Observation")
 async def create_observation(data: dict):
     conn = None
     try:
-        # Extração do ID numérico a partir da string "Patient/89980748"
+        # 1. Extração do ID local (do SQL) enviado no JSON (ex: "Patient/1")
         refer_string = data.get('refer', '')
-        paciente_id = int(refer_string.split('/')[-1]) if '/' in refer_string else None
+        local_patient_id = int(refer_string.split('/')[-1]) if '/' in refer_string else None
+
+        if not local_patient_id:
+            raise HTTPException(status_code=400, detail="Referência de paciente inválida. Use 'Patient/ID'")
 
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            
-            # 1. Tabela: observacoes
-            cur.execute(
-                """INSERT INTO observacoes (paciente_id, estado, refer, dataExecucao) 
-                   VALUES (%s, %s, %s, %s) RETURNING id""",
-                (paciente_id, data.get('estado'), refer_string, data.get('dataExecucao'))
-            )
-            obs_id = cur.fetchone()['id']
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
-            # 2. Tabela: codigo
-            obj_codigo = data.get('codigo', {})
-            cur.execute(
-                "INSERT INTO codigo (observacoes_id, text) VALUES (%s, %s) RETURNING id",
-                (obs_id, obj_codigo.get('text'))
-            )
-            codigo_id = cur.fetchone()['id']
+        # --- PASSO A: TRADUÇÃO DE ID (SQL -> FHIR) ---
+        # Vamos buscar o fhir_id que o HAPI conhece para este paciente
+        cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_patient_id,))
+        paciente_row = cur.fetchone()
 
-            # 3. Tabela: coding (Iteração sobre o array)
-            for item in obj_codigo.get('coding', []):
-                cur.execute(
-                    """INSERT INTO coding (codigo_id, system, cod, disp) 
-                       VALUES (%s, %s, %s, %s)""",
-                    (codigo_id, item.get('system'), item.get('cod'), item.get('disp'))
-                )
-
-            # 4. Tabela: medicao
-            m = data.get('medicao', {})
-            cur.execute(
-                """INSERT INTO medicao (observacoes_id, valor, unidade, sistema, cod) 
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (obs_id, m.get('valor'), m.get('unidade'), m.get('sistema'), m.get('cod'))
+        if not paciente_row or not paciente_row['fhir_id']:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"O paciente local {local_patient_id} não existe ou não foi sincronizado com o HAPI primeiro."
             )
 
-            conn.commit()
+        fhir_patient_id = paciente_row['fhir_id'] # Ex: "1000"
 
-# --- PASSO B: MANDAR PARA O HAPI (FHIR) ---
+        # --- PASSO B: INSERIR NO TEU SQL (TABELAS LOCAIS) ---
+        
+        # 1. Tabela: observacoes
+        cur.execute(
+            """INSERT INTO observacoes (paciente_id, estado, refer, dataExecucao) 
+               VALUES (%s, %s, %s, %s) RETURNING id""",
+            (local_patient_id, data.get('estado'), refer_string, data.get('dataExecucao'))
+        )
+        obs_id = cur.fetchone()['id']
 
-        # 1. Preparar a lista de códigos (coding)
-        lista_codigos = []
-        for c in obj_codigo.get('coding', []):
-            lista_codigos.append({
+        # 2. Tabela: codigo
+        obj_codigo = data.get('codigo', {})
+        cur.execute(
+            "INSERT INTO codigo (observacoes_id, text) VALUES (%s, %s) RETURNING id",
+            (obs_id, obj_codigo.get('text'))
+        )
+        codigo_id = cur.fetchone()['id']
+
+        # 3. Tabela: coding
+        for item in obj_codigo.get('coding', []):
+            cur.execute(
+                """INSERT INTO coding (codigo_id, system, cod, disp) 
+                   VALUES (%s, %s, %s, %s)""",
+                (codigo_id, item.get('system'), item.get('cod'), item.get('disp'))
+            )
+
+        # 4. Tabela: medicao
+        m = data.get('medicao', {})
+        cur.execute(
+            """INSERT INTO medicao (observacoes_id, valor, unidade, sistema, cod) 
+               VALUES (%s, %s, %s, %s, %s)""",
+            (obs_id, m.get('valor'), m.get('unidade'), m.get('sistema'), m.get('cod'))
+        )
+
+        # Grava os dados no teu Postgres
+        conn.commit()
+
+        # --- PASSO C: MANDAR PARA O HAPI (COM O ID TRADUZIDO) ---
+
+        lista_codigos = [
+            {
                 "system": c.get('system'),
-                "code": c.get('cod'),      # O HAPI exige a chave 'code'
-                "display": c.get('disp')    # O HAPI exige a chave 'display'
-            })
+                "code": str(c.get('cod')),
+                "display": c.get('disp')
+            } for c in obj_codigo.get('coding', [])
+        ]
 
-        # 2. Preparar os dados da medição
-        dados_medicao = {
-            "value": m.get('valor'),
-            "unit": m.get('unidade'),
-            "system": m.get('sistema'),
-            "code": m.get('cod')
-        }
-
-        # 3. Montar o JSON final para o Servidor HAPI
         fhir_payload = {
             "resourceType": "Observation",
             "status": data.get('estado'),
-            "subject": {"reference": refer_string},
+            "subject": {"reference": f"Patient/{fhir_patient_id}"}, # <--- TRADUÇÃO AQUI!
             "effectiveDateTime": data.get('dataExecucao'),
             "code": {
                 "coding": lista_codigos,
                 "text": obj_codigo.get('text')
             },
-            "valueQuantity": dados_medicao  # Aqui a chave tem de ser esta para o HAPI entender
+            "valueQuantity": {
+                "value": m.get('valor'),
+                "unit": m.get('unidade'),
+                "system": m.get('sistema'),
+                "code": str(m.get('cod'))
+            }
         }
 
-        hapi_url = os.getenv("HAPI_URL", "http://localhost:8080/fhir/Observation")
+        hapi_url = "http://localhost:9000/fhir/Observation"
+        headers = {
+            "Content-Type": "application/fhir+json;charset=utf-8",
+            "Accept": "application/fhir+json;charset=utf-8"
+        }
+
         try:
-            hapi_res = requests.post(hapi_url, json=fhir_payload, timeout=5)
-            hapi_status = hapi_res.status_code
-        except Exception:
-            hapi_status = "HAPI offline"
+            hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=10)
+            
+            if hapi_res.status_code in [200, 201]:
+                fhir_obs_id = hapi_res.json().get('id')
+                
+                # --- PASSO D: GUARDAR O fhir_id DA OBSERVAÇÃO ---
+                cur.execute(
+                    "UPDATE observacoes SET fhir_id = %s WHERE id = %s",
+                    (str(fhir_obs_id), obs_id)
+                )
+                conn.commit()
+                
+                return {
+                    "mensagem": "Sucesso! Tradução feita e sincronizada.",
+                    "id_local_obs": obs_id,
+                    "id_fhir_obs": fhir_obs_id,
+                    "paciente_mapeado": f"Local:{local_patient_id} -> FHIR:{fhir_patient_id}"
+                }
+            else:
+                return {
+                    "mensagem": "Gravado no SQL, mas o HAPI rejeitou o JSON",
+                    "status_hapi": hapi_res.status_code,
+                    "erro_detalhado": hapi_res.text[:300]
+                }
 
-        return {
-            "status": "sucesso",
-            "db_id": obs_id,
-            "hapi_status": hapi_status
-        }
+        except Exception as hapi_err:
+            return {"mensagem": "Gravado no SQL, HAPI offline", "erro": str(hapi_err)}
 
     except Exception as e:
         if conn: conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Erro no servidor: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if conn: conn.close()
+        if conn:
+            cur.close()
+            conn.close()
 
-@app.get("/Patient/{patient_id}")
-async def get_patient(patient_id: int):
+@app.get("/Patient/{local_id}")
+async def get_patient(local_id: int):
     conn = None
     try:
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Buscar dados básicos do paciente
-            cur.execute("SELECT * FROM patients WHERE id = %s", (patient_id,))
-            patient = cur.fetchone()
-            if not patient:
-                raise HTTPException(status_code=404, detail="Paciente não encontrado")
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
-            # 2. Buscar Telecoms do Paciente
-            cur.execute("SELECT tipo, valor FROM telecom WHERE paciente_id = %s", (patient_id,))
-            patient['telecom'] = cur.fetchall()
+        # 1. Perguntar ao SQL: "Qual é o fhir_id deste paciente local?"
+        cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_id,))
+        result = cur.fetchone()
 
-            # 3. Buscar Contactos e os seus detalhes (Telecom e Endereço)
-            cur.execute("SELECT id, nome FROM contacto WHERE paciente_id = %s", (patient_id,))
-            contactos = cur.fetchall()
-            
-            for con in contactos:
-                # Telecoms do contacto
-                cur.execute("SELECT tipo, valor FROM telecom WHERE contacto_id = %s", (con['id'],))
-                con['telecom'] = cur.fetchall()
-                # Endereços do contacto
-                cur.execute("SELECT tipo, valor FROM endereco WHERE contacto_id = %s", (con['id'],))
-                con['endereco'] = cur.fetchall()
-            
-            patient['contacto'] = contactos
-            return patient
+        if not result:
+            raise HTTPException(status_code=404, detail="Paciente não existe no SQL")
+        
+        fhir_id = result.get('fhir_id')
+        
+        if not fhir_id:
+            raise HTTPException(status_code=404, detail="Paciente existe no SQL, mas não foi sincronizado com o HAPI")
+
+        # 2. Agora que temos o fhir_id (ex: '1000'), vamos ao HAPI (Porta 9000!)
+        hapi_url = f"http://localhost:9000/fhir/Patient/{fhir_id}"
+        
+        headers = {"Accept": "application/fhir+json"}
+        response = requests.get(hapi_url, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            return {
+                "id_local": local_id,
+                "id_fhir": fhir_id,
+                "recurso_fhir_completo": response.json()
+            }
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Erro ao buscar no HAPI")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if conn: conn.close()
+        if conn:
+            cur.close()
+            conn.close()
 
     
-@app.get("/Observation/{observation_id}")
-async def get_observation(observation_id: int):
+@app.get("/Observation/{local_id}")
+async def get_observation(local_id: int):
     conn = None
     try:
         conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Buscar a observação base
-            cur.execute("SELECT * FROM observacoes WHERE id = %s", (observation_id,))
-            obs = cur.fetchone()
-            if not obs:
-                raise HTTPException(status_code=404, detail="Observação não encontrada")
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
-            # 2. Buscar o Código (text e coding)
-            cur.execute("SELECT id, text FROM codigo WHERE observacoes_id = %s", (observation_id,))
-            codigo_obj = cur.fetchone()
-            if codigo_obj:
-                cur.execute("SELECT system, cod, disp FROM coding WHERE codigo_id = %s", (codigo_obj['id'],))
-                codigo_obj['coding'] = cur.fetchall()
-                obs['codigo'] = codigo_obj
+        # 1. Procurar o fhir_id na tua tabela 'observacoes'
+        cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
+        result = cur.fetchone()
 
-            # 3. Buscar a Medição
-            cur.execute("SELECT valor, unidade, sistema, cod FROM medicao WHERE observacoes_id = %s", (observation_id,))
-            obs['medicao'] = cur.fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
+        
+        fhir_id = result.get('fhir_id')
+        
+        if not fhir_id:
+            raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
 
-            return obs
+        # 2. Ir buscar ao HAPI usando o fhir_id (ex: '1001')
+        # Porta 9000 e prefixo /fhir conforme o teu Docker
+        hapi_url = f"http://localhost:9000/fhir/Observation/{fhir_id}"
+        
+        headers = {"Accept": "application/fhir+json"}
+        response = requests.get(hapi_url, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            return {
+                "id_local": local_id,
+                "id_fhir": fhir_id,
+                "dados_provenientes_do_hapi": response.json()
+            }
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if conn: conn.close()
+        if conn:
+            cur.close()
+            conn.close()

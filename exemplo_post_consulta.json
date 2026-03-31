@@ -1,0 +1,6 @@
+{
+  "refer_paciente": "Patient/1",
+  "refer_medico": "Practitioner/5",
+  "data_consulta": "2026-03-31T15:00:00Z",
+  "tipo_consulta": "Cardiologia"
+}

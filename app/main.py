@@ -305,8 +305,92 @@ async def create_observation(data: dict):
             cur.close()
             conn.close()
 
+<<<<<<< HEAD
 @app.get("/Patient/{local_id}")
 async def get_patient(local_id: int):
+=======
+@app.post("/Encounter")
+async def create_encounter(data: dict):
+    conn = None
+    try:
+        # --- 1. PREPARAÇÃO (Extrair os números dos IDs que já existem) ---
+        
+        # Paciente: "Patient/1" -> vira 1
+        ref_paciente = data.get('refer_paciente', '')
+        id_paciente_sql = int(ref_paciente.split('/')[-1]) if '/' in ref_paciente else None
+
+        # Médico: "Practitioner/5" -> vira 5
+        ref_medico = data.get('refer_medico', '')
+        id_medico_sql = int(ref_medico.split('/')[-1]) if '/' in ref_medico else None
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            
+            # --- PASSO A: SQL (Ligar os dois na tabela consultas) ---
+            cur.execute(
+                """INSERT INTO consultas (paciente_id, medico_id, data_consulta, tipo_consulta) 
+                   VALUES (%s, %s, %s, %s) RETURNING id""",
+                (id_paciente_sql, id_medico_sql, data.get('data_consulta'), data.get('tipo_consulta'))
+            )
+            consulta_id = cur.fetchone()['id']
+            conn.commit()
+
+        # --- PASSO B: MANDAR PARA O HAPI (O pacote completo) ---
+
+        # 1. Preparar a lista de participantes (Médico)
+        # Criamos a lista separada, tal como fizeste com os códigos
+        lista_participantes = []
+        if ref_medico:
+            lista_participantes.append({
+                "individual": {"reference": ref_medico}
+            })
+
+        # 2. Preparar o período (Data)
+        # Isolamos a parte do tempo para o payload não ficar gigante
+        periodo_consulta = {
+            "start": data.get('data_consulta')
+        }
+
+        # 3. Preparar o tipo de consulta
+        # O FHIR espera uma lista de conceitos para o tipo
+        lista_tipos = [
+            {"text": data.get('tipo_consulta')}
+        ]
+
+        # 4. Montar o JSON final (Payload)
+        # Agora o payload fica limpo porque as "peças" já estão prontas acima
+        fhir_payload = {
+            "resourceType": "Encounter",
+            "status": "finished",
+            "subject": {"reference": ref_paciente},
+            "participant": lista_participantes,
+            "period": periodo_consulta,
+            "type": lista_tipos
+        }
+
+        # Envio para o HAPI
+        hapi_url = os.getenv("HAPI_URL", "http://localhost:8080/fhir/Encounter")
+        try:
+            hapi_res = requests.post(hapi_url, json=fhir_payload, timeout=5)
+            hapi_status = hapi_res.status_code
+        except Exception:
+            hapi_status = "HAPI offline"
+
+        return {
+            "status": "sucesso",
+            "consulta_id_sql": consulta_id,
+            "hapi_status": hapi_status
+        }
+
+    except Exception as e:
+        if conn: conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn: conn.close()
+
+@app.get("/Patient/{patient_id}")
+async def get_patient(patient_id: int):
+>>>>>>> ee44956681ae2d46650b295d373cb4afa5706f0d
     conn = None
     try:
         conn = get_db_connection()
@@ -387,6 +471,39 @@ async def get_observation(local_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
+<<<<<<< HEAD
         if conn:
             cur.close()
             conn.close()
+=======
+        if conn: conn.close()
+
+@app.get("/Encounter/{consulta_id}")
+async def get_encounter(consulta_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Buscar a consulta base
+            cur.execute("SELECT * FROM consultas WHERE id = %s", (consulta_id,))
+            consulta = cur.fetchone()
+            if not consulta:
+                raise HTTPException(status_code=404, detail="Consulta não encontrada")
+
+            # 2. Mapear os dados para o formato original (O bloco que recuperei)
+            # Reconvertemos os IDs da base de dados em Referências para o utilizador
+            resultado = {
+                "id": consulta['id'],
+                "refer_paciente": f"Patient/{consulta['paciente_id']}",
+                "refer_medico": f"Practitioner/{consulta['medico_id']}" if consulta['medico_id'] else None,
+                "data_consulta": consulta['data_consulta'],
+                "tipo_consulta": consulta['tipo_consulta']
+            }
+
+            return resultado
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn: conn.close()      
+>>>>>>> ee44956681ae2d46650b295d373cb4afa5706f0d

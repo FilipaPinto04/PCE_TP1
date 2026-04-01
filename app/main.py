@@ -346,47 +346,46 @@ async def get_patient(local_id: int):
             cur.close()
             conn.close()
 
-    
 @app.get("/Observation/{local_id}")
 async def get_observation(local_id: int):
     conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Usando 'with' para garantir que o cursor feche automaticamente
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-        # 1. Procurar o fhir_id na tua tabela 'observacoes'
-        cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
-        result = cur.fetchone()
+            # 1. Procurar o fhir_id na tua tabela 'observacoes'
+            cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
+            result = cur.fetchone()
 
-        if not result:
-            raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
-        
-        fhir_id = result.get('fhir_id')
-        
-        if not fhir_id:
-            raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
+            if not result:
+                raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
+            
+            fhir_id = result.get('fhir_id')
+            
+            if not fhir_id:
+                raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
 
-        # 2. Ir buscar ao HAPI usando o fhir_id (ex: '1001')
-        # Porta 9000 e prefixo /fhir conforme o teu Docker
-        hapi_url = f"http://localhost:9000/fhir/Observation/{fhir_id}"
-        
-        headers = {"Accept": "application/fhir+json"}
-        response = requests.get(hapi_url, headers=headers, timeout=5)
+            # 2. Ir buscar ao HAPI usando o fhir_id
+            hapi_url = f"http://localhost:9000/fhir/Observation/{fhir_id}"
+            headers = {"Accept": "application/fhir+json"}
+            response = requests.get(hapi_url, headers=headers, timeout=5)
 
-        if response.status_code == 200:
-            return {
-                "id_local": local_id,
-                "id_fhir": fhir_id,
-                "dados_provenientes_do_hapi": response.json()
-            }
-        elif response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
-        else:
-            raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
+            if response.status_code == 200:
+                return {
+                    "id_local": local_id,
+                    "id_fhir": fhir_id,
+                    "dados_provenientes_do_hapi": response.json()
+                }
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
+            else:
+                raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
 
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
-            cur.close()
             conn.close()

@@ -305,10 +305,6 @@ async def create_observation(data: dict):
             cur.close()
             conn.close()
 
-<<<<<<< HEAD
-@app.get("/Patient/{local_id}")
-async def get_patient(local_id: int):
-=======
 @app.post("/Encounter")
 async def create_encounter(data: dict):
     conn = None
@@ -388,9 +384,8 @@ async def create_encounter(data: dict):
     finally:
         if conn: conn.close()
 
-@app.get("/Patient/{patient_id}")
-async def get_patient(patient_id: int):
->>>>>>> ee44956681ae2d46650b295d373cb4afa5706f0d
+@app.get("/Patient/{local_id}")
+async def get_patient(local_id: int):
     conn = None
     try:
         conn = get_db_connection()
@@ -430,68 +425,63 @@ async def get_patient(patient_id: int):
             cur.close()
             conn.close()
 
-    
 @app.get("/Observation/{local_id}")
 async def get_observation(local_id: int):
     conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Usando 'with' para garantir que o cursor feche automaticamente
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-        # 1. Procurar o fhir_id na tua tabela 'observacoes'
-        cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
-        result = cur.fetchone()
+            # 1. Procurar o fhir_id na tua tabela 'observacoes'
+            cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
+            result = cur.fetchone()
 
-        if not result:
-            raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
-        
-        fhir_id = result.get('fhir_id')
-        
-        if not fhir_id:
-            raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
+            if not result:
+                raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
+            
+            fhir_id = result.get('fhir_id')
+            
+            if not fhir_id:
+                raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
 
-        # 2. Ir buscar ao HAPI usando o fhir_id (ex: '1001')
-        # Porta 9000 e prefixo /fhir conforme o teu Docker
-        hapi_url = f"http://localhost:9000/fhir/Observation/{fhir_id}"
-        
-        headers = {"Accept": "application/fhir+json"}
-        response = requests.get(hapi_url, headers=headers, timeout=5)
+            # 2. Ir buscar ao HAPI usando o fhir_id
+            hapi_url = f"http://localhost:9000/fhir/Observation/{fhir_id}"
+            headers = {"Accept": "application/fhir+json"}
+            response = requests.get(hapi_url, headers=headers, timeout=5)
 
-        if response.status_code == 200:
-            return {
-                "id_local": local_id,
-                "id_fhir": fhir_id,
-                "dados_provenientes_do_hapi": response.json()
-            }
-        elif response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
-        else:
-            raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
+            if response.status_code == 200:
+                return {
+                    "id_local": local_id,
+                    "id_fhir": fhir_id,
+                    "dados_provenientes_do_hapi": response.json()
+                }
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
+            else:
+                raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
 
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-<<<<<<< HEAD
         if conn:
-            cur.close()
             conn.close()
-=======
-        if conn: conn.close()
 
 @app.get("/Encounter/{consulta_id}")
-async def get_encounter(consulta_id: int):
+async def get_encounter(local_id: int):
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # 1. Buscar a consulta base
-            cur.execute("SELECT * FROM consultas WHERE id = %s", (consulta_id,))
+            cur.execute("SELECT * FROM consultas WHERE id = %s", (local_id,))
             consulta = cur.fetchone()
             if not consulta:
                 raise HTTPException(status_code=404, detail="Consulta não encontrada")
 
-            # 2. Mapear os dados para o formato original (O bloco que recuperei)
-            # Reconvertemos os IDs da base de dados em Referências para o utilizador
+            # 2. Mapear os dados para o formato original
             resultado = {
                 "id": consulta['id'],
                 "refer_paciente": f"Patient/{consulta['paciente_id']}",
@@ -503,7 +493,9 @@ async def get_encounter(consulta_id: int):
             return resultado
 
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if conn: conn.close()      
->>>>>>> ee44956681ae2d46650b295d373cb4afa5706f0d
+        if conn:
+            conn.close()

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS endereco (
 
 CREATE TABLE IF NOT EXISTS consultas (
     id SERIAL PRIMARY KEY,
+    fhir_id VARCHAR(50), 
     paciente_id INT REFERENCES patients(id) ON DELETE CASCADE,
     medico_id INT REFERENCES medicos(id) ON DELETE SET NULL,
     data_consulta TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

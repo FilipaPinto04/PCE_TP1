@@ -1,0 +1,26 @@
+{
+    "nome": "Dr. Guilherme Santos",
+    "genero": "m",
+    "especialidade": "Cardiologia",
+    "contacto": [
+      {
+        "nome": "Secretariado Clínica Central",
+        "telecom": [
+          {
+            "tipo": "telemóvel",
+            "valor": "910111222"
+          },
+          {
+            "tipo": "email",
+            "valor": "clinica.santos@mail.pt"
+          }
+        ],
+        "endereco": [
+          {
+            "tipo": "trabalho",
+            "valor": "Avenida da Liberdade, 102, Lisboa"
+          }
+        ]
+      }
+    ]
+  }

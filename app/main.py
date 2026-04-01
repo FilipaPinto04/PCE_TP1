@@ -584,6 +584,64 @@ async def get_observation(local_id: int):
             conn.close()
 
 
+@app.get("/Observation")
+async def get_patient_observations(patient: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # 1. Traduzir o ID local do paciente para o fhir_id do HAPI
+        cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (patient,))
+        res_paciente = cur.fetchone()
+
+        if not res_paciente or not res_paciente['fhir_id']:
+            raise HTTPException(
+                status_code=404, 
+                detail="Paciente não encontrado ou não sincronizado com o HAPI"
+            )
+
+        fhir_patient_id = res_paciente['fhir_id']
+
+        # 2. Consultar o HAPI usando o filtro de paciente (?patient=ID)
+        # O HAPI permite filtrar recursos usando parâmetros de query
+        hapi_url = f"http://localhost:9000/fhir/Observation?patient={fhir_patient_id}"
+        
+        headers = {"Accept": "application/fhir+json"}
+        response = requests.get(hapi_url, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            # O HAPI devolve um "Bundle" (um pacote com uma lista de entradas)
+            fhir_data = response.json()
+            
+            # Extraímos apenas a lista de observações para ser mais fácil de ler
+            observacoes = []
+            if "entry" in fhir_data:
+                for entry in fhir_data["entry"]:
+                    observacoes.append(entry["resource"])
+
+            return {
+                "id_local_paciente": patient,
+                "id_fhir_paciente": fhir_patient_id,
+                "total_observacoes": len(observacoes),
+                "lista_observacoes": observacoes
+            }
+        else:
+            raise HTTPException(
+                status_code=response.status_code, 
+                detail="Erro ao procurar observações no HAPI"
+            )
+
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
+
+
 @app.get("/Practitioner/{local_id}")
 async def get_practitioner(local_id: int):
     conn = None

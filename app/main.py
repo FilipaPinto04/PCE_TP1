@@ -499,3 +499,124 @@ async def get_encounter(local_id: int):
     finally:
         if conn:
             conn.close()
+
+
+#MEDICO--------------------------------------------------------------------------------------------------------
+@app.post("/Practitioner")
+async def create_practitioner(data: dict):
+    conn = None
+    try:
+        # Extrair dados do JSON enviado (ex: {"nome": "Dr. Manuel", "genero": "m", "especialidade": "Cardiologia"})
+        nome_medico = data.get('nome', 'Médico Desconhecido')
+        genero_raw = data.get('genero', 'unknown')
+        especialidade = data.get('especialidade', 'Clínica Geral')
+
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # --- PASSO 1: Inserir na tua tabela local 'medicos' ---
+        cur.execute(
+            "INSERT INTO medicos (nome, genero, especialidade) VALUES (%s, %s, %s) RETURNING id",
+            (nome_medico, genero_raw, especialidade)
+        )
+        medico_id_local = cur.fetchone()['id']
+        conn.commit() # Grava logo para garantir que o ID local existe
+
+        # --- PASSO 2: Preparar o "pacote" (Payload) para o HAPI ---
+        # Nota: O HAPI chama-lhe "Practitioner"
+        fhir_payload = {
+            "resourceType": "Practitioner",
+            "name": [{"text": nome_medico}],
+            "gender": "male" if genero_raw == "m" else "female" if genero_raw == "f" else "unknown",
+            "qualification": [
+                {
+                    "code": {
+                        "text": especialidade
+                    }
+                }
+            ]
+        }
+
+        # --- PASSO 3: Enviar para o HAPI (Porta 9000) ---
+        hapi_url = "http://localhost:9000/fhir/Practitioner"
+        headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
+        
+        try:
+            hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=5)
+            
+            if hapi_res.status_code in [200, 201]:
+                fhir_id_gerado = hapi_res.json().get('id')
+                
+                # --- PASSO 4: Atualizar o fhir_id no teu SQL ---
+                cur.execute(
+                    "UPDATE medicos SET fhir_id = %s WHERE id = %s",
+                    (str(fhir_id_gerado), medico_id_local)
+                )
+                conn.commit()
+                
+                return {
+                    "mensagem": "Médico criado e sincronizado com HAPI!",
+                    "id_local": medico_id_local,
+                    "id_fhir": fhir_id_gerado
+                }
+            else:
+                return {
+                    "mensagem": "Médico guardado apenas localmente. HAPI rejeitou os dados.",
+                    "id_local": medico_id_local,
+                    "erro_hapi": hapi_res.text[:200]
+                }
+        except Exception as e:
+            return {
+                "mensagem": "Médico guardado apenas localmente. HAPI offline.",
+                "id_local": medico_id_local,
+                "aviso": str(e)
+            }
+
+    except Exception as e:
+        if conn: conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao criar médico: {str(e)}")
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
+
+
+
+@app.get("/Practitioner/{local_id}")
+async def get_practitioner(local_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # 1. Procurar o fhir_id na tua tabela 'medicos'
+        cur.execute("SELECT fhir_id FROM medicos WHERE id = %s", (local_id,))
+        result = cur.fetchone()
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Médico não existe no SQL local")
+        
+        fhir_id = result.get('fhir_id')
+        
+        if not fhir_id:
+            raise HTTPException(status_code=404, detail="Médico local sem fhir_id (não sincronizado)")
+
+        # 2. Ir buscar ao HAPI os dados completos
+        hapi_url = f"http://localhost:9000/fhir/Practitioner/{fhir_id}"
+        response = requests.get(hapi_url, timeout=5)
+
+        if response.status_code == 200:
+            return {
+                "id_local": local_id,
+                "id_fhir": fhir_id,
+                "recurso_fhir_do_servidor": response.json()
+            }
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Erro ao comunicar com HAPI")
+
+    except Exception as e:
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()

@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS patients (
 
 CREATE TABLE IF NOT EXISTS medicos (
     id SERIAL PRIMARY KEY,
-    fhir_id VARCHAR(50),      -- ADICIONA ISTO PARA SINCRONIZAÇÃO
+    fhir_id VARCHAR(50),      
     nome VARCHAR(255) NOT NULL,
     genero CHAR(1),
     especialidade VARCHAR(100)

@@ -23,7 +23,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 FHIR_SERVER_URL = os.getenv("FHIR_SERVER_URL", "http://localhost:9000/fhir")
 
 def get_db_connection():
-    # Nota: Certifica-te que estas credenciais coincidem com o teu docker-compose
+    # Credenciais iguais às do docker-compose
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=os.getenv("DB_PORT", 5432),
@@ -36,7 +36,6 @@ def init_db():
     conn = None
     try:
         conn = get_db_connection()
-        # Procura o ficheiro schema.sql na mesma pasta
         schema_path = os.path.join(os.path.dirname(__file__), "../db/schema.sql")
         
         if os.path.exists(schema_path):
@@ -85,9 +84,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
     
 def validar_recurso_fhir(recurso_json, tipo_recurso):
-    """
-    Pergunta ao HAPI se o JSON é um recurso FHIR válido antes de o gravarmos.
-    """
+    # Pergunta ao HAPI se o JSON é um recurso FHIR válido antes de o gravarmos.
     url_valida = f"{FHIR_SERVER_URL}/{tipo_recurso}/$validate"
     try:
         res = requests.post(url_valida, json=recurso_json, timeout=5)
@@ -104,7 +101,6 @@ def validar_recurso_fhir(recurso_json, tipo_recurso):
     
 @app.on_event("startup")
 async def startup_event():
-    # Aqui tu CHAMAS a função que definiste acima
     print("--- Verificando SQL Local ---")
     init_db() 
     
@@ -161,10 +157,10 @@ async def login(data: dict):
     if not verify_password(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Password incorreta")
 
-    # Se chegou aqui, as credenciais estão certas! Gerar o Token
+    # Gerar o Token
     access_token = create_access_token(data={"sub": user["username"]})
     
-    # ESTE RETURN É O QUE O POSTMAN VAI MOSTRAR
+    # este return é o que o postman vai mostrar 
     return {
         "access_token": access_token, 
         "token_type": "bearer"
@@ -174,7 +170,7 @@ async def login(data: dict):
 async def create_patient(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # --- 1. PREPARAÇÃO DOS DADOS E PAYLOAD FHIR ---
+        # preparação dos dados e payload fhir 
         nome_paciente = data.get('nome', 'Sem Nome')
         genero_raw = data.get('genero', 'unknown')
 
@@ -211,12 +207,12 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
             "contact": fhir_contacts
         }
 
-        # --- 2. VALIDAÇÃO FHIR (ANTES DE TOCAR NO SQL) ---
+        # validação fhir 
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Patient")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro de Schema FHIR: {mensagem}")
 
-        # --- 3. SE VÁLIDO, INSERIR NO SQL LOCAL (TRANSAÇÃO COMPLETA) ---
+        # se estiver válido, insere no sql
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -234,7 +230,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                 (paciente_id_local, tel.get('tipo'), tel.get('valor'))
             )
 
-        # Inserir Contactos e seus detalhes (Maria, etc)
+        # Inserir Contactos e seus detalhes
         for con in data.get('contacto', []):
             cur.execute(
                 "INSERT INTO contacto (paciente_id, nome) VALUES (%s, %s) RETURNING id",
@@ -256,7 +252,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
 
         conn.commit() # Grava tudo localmente com segurança
 
-        # --- 4. ENVIO FINAL PARA O HAPI ---
+        # enviar para o hapi
         hapi_url = f"{FHIR_SERVER_URL}/Patient"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
 
@@ -277,7 +273,6 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                     "status": "sucesso",
                     "id_local": paciente_id_local,
                     "id_fhir": fhir_id_gerado,
-                    "mensagem": "Paciente e relacionamentos sincronizados!"
                 }
             else:
                 return {
@@ -302,7 +297,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
 async def create_observation(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # --- 1. PREPARAÇÃO E TRADUÇÃO DE IDs ---
+        # preparação e tradução dos id
         refer_string = data.get('refer', '')
         local_patient_id = int(refer_string.split('/')[-1]) if '/' in refer_string else None
 
@@ -324,7 +319,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
 
         fhir_patient_id = paciente_row['fhir_id']
 
-        # --- 2. MONTAR PAYLOAD E VALIDAR NO HAPI (ANTES DO SQL) ---
+        # montar o payload e validar no hapi
         obj_codigo = data.get('codigo', {})
         m = data.get('medicao', {})
         
@@ -353,12 +348,10 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             }
         }
 
-        # VALIDAÇÃO FHIR AQUI (Se falhar, o código para e não grava no SQL)
+        # validação do fhir (Se falhar, o código para e não grava no SQL)
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Observation")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro de Schema FHIR: {mensagem}")
-
-        # --- 3. INSERIR NO SQL LOCAL (SÓ SE FOR VÁLIDO) ---
         
         # Inserir Observação
         cur.execute(
@@ -392,7 +385,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         
         conn.commit() # Confirmar gravação local
 
-        # --- 4. ENVIO FINAL PARA O HAPI ---
+        # envio final para o hapi 
         hapi_url = f"{FHIR_SERVER_URL}/Observation"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
 
@@ -423,7 +416,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
 
     except Exception as e:
         if conn: conn.rollback()
-        # Se for um erro que nós lançamos (HTTPException), passamos adiante
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -436,7 +428,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
 async def create_practitioner(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # --- 1. PREPARAÇÃO DOS DADOS ---
+        # preparação dos dados 
         nome_medico = data.get('nome', 'Médico Desconhecido')
         genero_raw = data.get('genero', 'unknown')
         especialidade = data.get('especialidade', 'Clínica Geral')
@@ -444,7 +436,7 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
         # Tradução de género para o padrão FHIR
         fhir_gender = "male" if genero_raw == "m" else "female" if genero_raw == "f" else "unknown"
 
-        # --- 2. MONTAR PAYLOAD E VALIDAR NO HAPI (ANTES DO SQL) ---
+        # montar payload e validar no hapi 
         fhir_payload = {
             "resourceType": "Practitioner",
             "name": [{"text": nome_medico}],
@@ -458,12 +450,12 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
             ]
         }
 
-        # VALIDAÇÃO FHIR (Se o HAPI não gostar do JSON, o código para aqui)
+        # validação do fhir (Se falhar, o código para e não grava no SQL)
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Practitioner")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro no Schema Practitioner: {mensagem}")
 
-        # --- 3. SE VÁLIDO, INSERIR NO SQL LOCAL ---
+        # inserir no sql
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
@@ -474,7 +466,7 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
         medico_id_local = cur.fetchone()['id']
         conn.commit()
 
-        # --- 4. ENVIO DEFINITIVO PARA O HAPI ---
+        # envio para o hapi 
         hapi_url = f"{FHIR_SERVER_URL}/Practitioner"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
 
@@ -526,7 +518,7 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
 async def create_encounter(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # 1. Extração dos IDs locais (ex: "Patient/1" -> 1)
+        # Extração dos IDs locais
         ref_paciente_local = data.get('refer_paciente', '')
         id_paciente_sql = int(ref_paciente_local.split('/')[-1]) if '/' in ref_paciente_local else None
 
@@ -536,7 +528,7 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
         if not id_paciente_sql:
             raise HTTPException(status_code=400, detail="Referência de paciente inválida.")
 
-        # --- PASSO A: TRADUÇÃO DE IDs (SÓ CONSULTA, SEM INSERT AINDA) ---
+        # tradução de ids 
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -547,7 +539,7 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             raise HTTPException(status_code=400, detail="Paciente local não sincronizado com HAPI.")
         fhir_id_paciente = row_p['fhir_id']
 
-        # Buscar fhir_id do Médico (se existir)
+        # Buscar fhir_id do Médico 
         fhir_id_medico = None
         if id_medico_sql:
             cur.execute("SELECT fhir_id FROM medicos WHERE id = %s", (id_medico_sql,))
@@ -555,7 +547,7 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             if row_m and row_m['fhir_id']:
                 fhir_id_medico = row_m['fhir_id']
 
-        # --- PASSO B: PREPARAR PAYLOAD E VALIDAR (ANTES DE GRAVAR NO SQL) ---
+        # preparar e validar payload 
         lista_participantes = []
         if fhir_id_medico:
             lista_participantes.append({
@@ -571,12 +563,12 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             "type": [{"text": data.get('tipo_consulta')}]
         }
 
-        # VALIDAÇÃO FHIR (Se falhar, o código para aqui e não suja o SQL)
+        # validação fhir 
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Encounter")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro no Schema Encounter: {mensagem}")
 
-        # --- PASSO C: INSERIR NO SQL LOCAL (SÓ SE FOR VÁLIDO) ---
+        # inserir no sql 
         try:
             # Inserir consulta
             cur.execute(
@@ -596,7 +588,7 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             conn.rollback()
             raise HTTPException(status_code=500, detail=f"Erro ao gravar no SQL local: {str(sql_err)}")
 
-        # --- PASSO D: ENVIO FINAL PARA O HAPI ---
+        # envio para o hapi 
         hapi_url = f"{FHIR_SERVER_URL}/Encounter"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
 
@@ -647,7 +639,7 @@ async def get_patient(local_id: int, current_user: str = Depends(get_current_use
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Perguntar ao SQL: "Qual é o fhir_id deste paciente local?"
+        # Traduzir o ID local do paciente para o fhir_id do HAPI
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_id,))
         result = cur.fetchone()
 
@@ -659,7 +651,7 @@ async def get_patient(local_id: int, current_user: str = Depends(get_current_use
         if not fhir_id:
             raise HTTPException(status_code=404, detail="Paciente existe no SQL, mas não foi sincronizado com o HAPI")
 
-        # 2. Agora que temos o fhir_id (ex: '1000'), vamos ao HAPI (Porta 9000!)
+        # Ir buscar ao HAPI usando o fhir_id
         hapi_url = f"{FHIR_SERVER_URL}/Patient/{fhir_id}"
         
         headers = {"Accept": "application/fhir+json"}
@@ -686,36 +678,35 @@ async def get_observation(local_id: int, current_user: str = Depends(get_current
     conn = None
     try:
         conn = get_db_connection()
-        # Usando 'with' para garantir que o cursor feche automaticamente
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
-            # 1. Procurar o fhir_id na tua tabela 'observacoes'
-            cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
-            result = cur.fetchone()
+        # Traduzir o ID local do paciente para o fhir_id do HAPI
+        cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
+        result = cur.fetchone()
 
-            if not result:
-                raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
-            
-            fhir_id = result.get('fhir_id')
-            
-            if not fhir_id:
-                raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
+        if not result:
+            raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
+        
+        fhir_id = result.get('fhir_id')
+        
+        if not fhir_id:
+            raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
 
-            # 2. Ir buscar ao HAPI usando o fhir_id
-            hapi_url = f"{FHIR_SERVER_URL}/Observation/{fhir_id}"
-            headers = {"Accept": "application/fhir+json"}
-            response = requests.get(hapi_url, headers=headers, timeout=5)
+        # Ir buscar ao HAPI usando o fhir_id
+        hapi_url = f"{FHIR_SERVER_URL}/Observation/{fhir_id}"
+        headers = {"Accept": "application/fhir+json"}
+        response = requests.get(hapi_url, headers=headers, timeout=5)
 
-            if response.status_code == 200:
-                return {
-                    "id_local": local_id,
-                    "id_fhir": fhir_id,
-                    "dados_provenientes_do_hapi": response.json()
-                }
-            elif response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
-            else:
-                raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
+        if response.status_code == 200:
+            return {
+                "id_local": local_id,
+                "id_fhir": fhir_id,
+                "dados_provenientes_do_hapi": response.json()
+            }
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
 
     except Exception as e:
         if isinstance(e, HTTPException):
@@ -733,7 +724,7 @@ async def get_patient_observations(patient: int, current_user: str = Depends(get
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Traduzir o ID local do paciente para o fhir_id do HAPI
+        # Traduzir o ID local do paciente para o fhir_id do HAPI
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (patient,))
         res_paciente = cur.fetchone()
 
@@ -745,15 +736,14 @@ async def get_patient_observations(patient: int, current_user: str = Depends(get
 
         fhir_patient_id = res_paciente['fhir_id']
 
-        # 2. Consultar o HAPI usando o filtro de paciente (?patient=ID)
-        # O HAPI permite filtrar recursos usando parâmetros de query
+        # Consultar o HAPI usando o filtro de paciente (?patient=ID)
         hapi_url = f"{FHIR_SERVER_URL}/Observation?patient={fhir_patient_id}"
         
         headers = {"Accept": "application/fhir+json"}
         response = requests.get(hapi_url, headers=headers, timeout=5)
 
         if response.status_code == 200:
-            # O HAPI devolve um "Bundle" (um pacote com uma lista de entradas)
+            # O HAPI devolve lista de entradas
             fhir_data = response.json()
             
             # Extraímos apenas a lista de observações para ser mais fácil de ler
@@ -791,7 +781,7 @@ async def get_practitioner(local_id: int, current_user: str = Depends(get_curren
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Procurar o fhir_id na tua tabela local 'medicos'
+        # Procurar o fhir_id na tua tabela local 'medicos'
         cur.execute("SELECT fhir_id FROM medicos WHERE id = %s", (local_id,))
         result = cur.fetchone()
 
@@ -803,7 +793,7 @@ async def get_practitioner(local_id: int, current_user: str = Depends(get_curren
         if not fhir_id:
             raise HTTPException(status_code=404, detail="Médico local sem fhir_id (não sincronizado com o HAPI)")
 
-        # 2. Ir buscar ao HAPI os dados completos (Porta 9000 e prefixo /fhir)
+        # 2. Ir buscar ao HAPI os dados completos
         hapi_url = f"{FHIR_SERVER_URL}/Practitioner/{fhir_id}"
         
         headers = {"Accept": "application/fhir+json"}
@@ -842,7 +832,7 @@ async def get_encounter(consulta_id: int, current_user: str = Depends(get_curren
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Buscar o fhir_id na tua tabela local 'consultas'
+        # Procurar o fhir_id na tua tabela local 'consultas'
         cur.execute("SELECT fhir_id FROM consultas WHERE id = %s", (consulta_id,))
         result = cur.fetchone()
 
@@ -857,8 +847,7 @@ async def get_encounter(consulta_id: int, current_user: str = Depends(get_curren
                 detail="Esta consulta existe no SQL, mas não tem um fhir_id (não foi sincronizada com o HAPI)"
             )
 
-        # 2. Ir buscar o recurso ao HAPI usando o fhir_id (Porta 9000!)
-        # O recurso FHIR para consultas chama-se "Encounter"
+        # Ir buscar o recurso ao HAPI usando o fhir_id
         hapi_url = f"{FHIR_SERVER_URL}/Encounter/{fhir_id}"
         
         headers = {"Accept": "application/fhir+json"}
@@ -881,7 +870,6 @@ async def get_encounter(consulta_id: int, current_user: str = Depends(get_curren
             raise HTTPException(status_code=503, detail=f"Servidor HAPI incontactável: {str(hapi_err)}")
 
     except Exception as e:
-        # Se for um erro que nós já lançámos (HTTPException), passamos adiante
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
@@ -898,7 +886,7 @@ async def get_patient_history(local_id: int, current_user: str = Depends(get_cur
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Descobrir qual é o ID do HAPI para este paciente
+        # Descobrir qual é o ID do HAPI para este paciente
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_id,))
         result = cur.fetchone()
         
@@ -907,7 +895,7 @@ async def get_patient_history(local_id: int, current_user: str = Depends(get_cur
 
         fhir_id = result['fhir_id']
 
-        # 2. Pedir ao HAPI todas as Observations deste subject
+        # Pedir ao HAPI todas as Observations deste subject
         hapi_url = f"{FHIR_SERVER_URL}/Observation?subject=Patient/{fhir_id}"
         response = requests.get(hapi_url)
 

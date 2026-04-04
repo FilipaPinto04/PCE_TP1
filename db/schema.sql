@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS contacto (
 CREATE TABLE IF NOT EXISTS telecom (
     id SERIAL PRIMARY KEY,
     paciente_id INT REFERENCES patients(id) ON DELETE CASCADE,
+    medico_id INT REFERENCES medicos(id) ON DELETE SET NULL,
     contacto_id INT REFERENCES contacto(id) ON DELETE CASCADE,
     tipo VARCHAR(50),
     valor VARCHAR(255)

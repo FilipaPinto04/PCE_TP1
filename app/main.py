@@ -478,21 +478,34 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
         genero_raw = data.get('genero', 'unknown')
         especialidade = data.get('especialidade', 'Clínica Geral')
 
-        # Tradução de género para o padrão FHIR
-        fhir_gender = "male" if genero_raw == "m" else "female" if genero_raw == "f" else "unknown"
+        # Mapeamento de Contactos/Telecoms para o FHIR (extraído do primeiro contacto do JSON)
+        fhir_telecoms = []
+        fhir_addresses = []
+        contactos_input = data.get('contacto', [])
 
-        # montar payload e validar no hapi 
+        if contactos_input:
+            primeiro_con = contactos_input[0]
+            # Prepara Telecoms (Lista)
+            fhir_telecoms = [
+                {"system": "phone" if tc.get('tipo') == "telemóvel" else "email", "value": tc.get('valor')}
+                for tc in primeiro_con.get('telecom', [])
+            ]
+            # Prepara Endereço (Objeto Único para Practitioner no FHIR)
+            addr_in = primeiro_con.get('endereco')
+            if addr_in and isinstance(addr_in, dict):
+                fhir_addresses = [{
+                    "use": "work" if addr_in.get('tipo') == "trabalho" else "home",
+                    "line": [addr_in.get('valor')]
+                }]
+
         fhir_payload = {
             "resourceType": "Practitioner",
+            "active": True,
             "name": [{"text": nome_medico}],
-            "gender": fhir_gender,
-            "qualification": [
-                {
-                    "code": {
-                        "text": especialidade
-                    }
-                }
-            ]
+            "gender": "male" if genero_raw == "m" else "female" if genero_raw == "f" else "unknown",
+            "telecom": fhir_telecoms,
+            "address": fhir_addresses,
+            "qualification": [{"code": {"text": especialidade}}]
         }
 
         # validação do fhir (Se falhar, o código para e não grava no SQL)
@@ -509,6 +522,30 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
             (nome_medico, genero_raw, especialidade)
         )
         medico_id_local = cur.fetchone()['id']
+
+        # Tabela 'contacto', 'telecom' e 'endereco'
+        for con in contactos_input:
+            cur.execute(
+                "INSERT INTO contacto (medico_id, nome) VALUES (%s, %s) RETURNING id",
+                (medico_id_local, con.get('nome'))
+            )
+            c_id = cur.fetchone()['id']
+            
+            # Telecoms do contacto
+            for t in con.get('telecom', []):
+                cur.execute(
+                    "INSERT INTO telecom (contacto_id, medico_id, tipo, valor) VALUES (%s, %s, %s, %s)",
+                    (c_id, medico_id_local, t.get('tipo'), t.get('valor'))
+                )
+            
+            # Endereço do contacto
+            e_obj = con.get('endereco')
+            if e_obj and isinstance(e_obj, dict):
+                cur.execute(
+                    "INSERT INTO endereco (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
+                    (c_id, e_obj.get('tipo'), e_obj.get('valor'))
+                )
+
         conn.commit()
 
         # envio para o hapi 

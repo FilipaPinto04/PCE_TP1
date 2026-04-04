@@ -20,10 +20,10 @@
                     "valor": "927895461"
                 }
             ],
-            "endereco": [{
+            "endereco": {
                 "tipo": "casa",
                 "valor": "Rua da Universidade, 25"
-            }]
+            }
         }
     ]
 }

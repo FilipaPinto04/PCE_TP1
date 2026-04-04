@@ -15,12 +15,11 @@
             "valor": "clinica.santos@mail.pt"
           }
         ],
-        "endereco": [
+        "endereco": 
           {
             "tipo": "trabalho",
             "valor": "Avenida da Liberdade, 102, Lisboa"
           }
-        ]
       }
     ]
   }

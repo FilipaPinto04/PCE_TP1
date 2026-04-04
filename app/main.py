@@ -3,11 +3,13 @@ import requests
 from fastapi import FastAPI, HTTPException
 from psycopg2.extras import RealDictCursor
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Depends
+from contextlib import asynccontextmanager
+
 
 app = FastAPI()
 
@@ -35,13 +37,18 @@ def get_db_connection():
 def init_db():
     conn = None
     try:
+        # Estabelece a ligação ao PostgreSQL (Porta 5432 no Docker)
         conn = get_db_connection()
+
+        # Localiza o ficheiro SQL que contém os comandos CREATE TABLE
         schema_path = os.path.join(os.path.dirname(__file__), "../db/schema.sql")
         
         if os.path.exists(schema_path):
+            # Abre e lê o conteúdo do ficheiro schema.sql
             with open(schema_path, "r", encoding="utf-8") as f:
                 sql_schema = f.read()
             
+            # Executa o script SQL na base de dados e confirma as alterações (commit)
             with conn.cursor() as cur:
                 cur.execute(sql_schema)
                 conn.commit()
@@ -50,67 +57,96 @@ def init_db():
             print("Ficheiro schema.sql não encontrado. Ignorando init_db.")
             
     except Exception as e:
+        # Captura erros de ligação ou de sintaxe no SQL
         print(f"Erro ao inicializar base de dados: {e}")
     finally:
+        # Garante que a ligação é fechada, independentemente de ter havido erro ou não
         if conn:
             conn.close()
 
+# Compara a password enviada pelo utilizador com a hash guardada no SQL
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
+# Transforma a password num código seguro (Hash) usando a biblioteca Passlib
 def get_password_hash(password):
     return pwd_context.hash(password)
 
+# Gera o Token que o utilizador usará nos próximos pedidos
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # Define o tempo de validade do token (ex: 30 minutos)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # Adiciona a data de expiração aos dados do token
     to_encode.update({"exp": expire})
+    # Assina o token com a tua SECRET_KEY para garantir que ninguém o consegue falsificar
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+# Função assíncrona que garante que apenas utilizadores logados com um token válido conseguem aceder aos teus endpoints
 async def get_current_user(token: str = Depends(oauth2_scheme)):
+    # Define a exceção padrão para erros de autenticação (HTTP 401 Unauthorized)
     credentials_exception = HTTPException(
         status_code=401,
         detail="Não foi possível validar as credenciais",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # Tenta ler o que está dentro do token usando a tua SECRET_KEY
+        # Tenta descodificar o token usando a SECRET_KEY e o Algoritmo
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Extrai o "sub" (Subject), que no neste caso guarda o username do utilizador
         username: str = payload.get("sub")
+        # Se o username não existir dentro do payload do token, o token é inválido
         if username is None:
             raise credentials_exception
         return username
+    # Se o JWT estiver mal formatado, expirado ou a assinatura for falsa, lança o erro 401
     except JWTError:
         raise credentials_exception
-    
+
+# Função que submete um recurso ao endpoint de validação ($validate) do HAPI FHIR    
 def validar_recurso_fhir(recurso_json, tipo_recurso):
     # Pergunta ao HAPI se o JSON é um recurso FHIR válido antes de o gravarmos.
     url_valida = f"{FHIR_SERVER_URL}/{tipo_recurso}/$validate"
     try:
+        # Envia o JSON para o HAPI apenas para validação (não grava nada ainda)
         res = requests.post(url_valida, json=recurso_json, timeout=5)
+        # O HAPI responde sempre com um recurso do tipo "OperationOutcome"
         resultado = res.json()
         
-        # O HAPI devolve um OperationOutcome
+        # Percorre a lista de 'issues' (problemas ou avisos) retornada pelo servidor
         for issue in resultado.get('issue', []):
             if issue.get('severity') == 'error':
                 return False, issue.get('diagnostics')
+        
+        # Se não encontrar erros críticos, o recurso é considerado válido
         return True, "Válido"
     except Exception as e:
-        # Se o HAPI estiver offline, não conseguimos validar
+        # Caso o servidor HAPI esteja desligado ou a rede falhe
         return False, f"Servidor de validação incontactável: {str(e)}"
-    
-@app.on_event("startup")
-async def startup_event():
+
+# Evento de ciclo de vida que corre automaticamente quando o FastAPI inicia    
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     print("--- Verificando SQL Local ---")
+    # Chama a função que lê o schema.sql e cria as tabelas se necessário
     init_db() 
     
     print("--- Verificando Servidor FHIR ---")
     try:
+        # Tenta aceder ao 'CapabilityStatement' (metadata) do servidor HAPI
         res = requests.get(f"{FHIR_SERVER_URL}/metadata", timeout=3)
+        # Se o HAPI responder com sucesso (200 OK), a integração está ativa
         if res.status_code == 200:
             print("HAPI FHIR: Online e pronto.")
+    # Captura falhas de rede ou servidor offline, avisando o administrador no terminal
     except Exception:
         print("HAPI FHIR: Servidor offline.")
+    
+    # A aplicação "corre" aqui enquanto este yield estiver ativo
+    yield
+    print("Encerrando aplicação...")
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/Register")
 async def register(data: dict):
@@ -123,13 +159,16 @@ async def register(data: dict):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # Insere o par Username + Hash na tabela de utilizadores
         cur.execute(
             "INSERT INTO usuarios (username, password_hash) VALUES (%s, %s)",
             (username, hashed_pw)
         )
+        # Confirma a criação do novo utilizador
         conn.commit()
         return {"msg": "Utilizador criado! Agora já podes fazer login."}
     except Exception as e:
+        # Se o username já existir ou houver erro de ligação, anula a operação
         conn.rollback()
         return {"erro": str(e)}
     finally:
@@ -141,15 +180,16 @@ async def login(data: dict):
     password = data.get("password")
 
     conn = get_db_connection()
+    # RealDictCursor permite aceder aos campos pelo nome: user["password_hash"]
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    # Procura o utilizador
+    # Procura o utilizador na base de dados pelo username enviado
     cur.execute("SELECT * FROM usuarios WHERE username = %s", (username,))
     user = cur.fetchone()
     cur.close()
     conn.close()
 
-    # Se o utilizador não existir ou a password falhar
+    # Verificação de existência: se o SELECT não devolver nada, o utilizador não existe
     if not user:
         raise HTTPException(status_code=401, detail="Utilizador não encontrado")
     
@@ -187,10 +227,8 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                 {"system": "phone" if tc.get('tipo') == "telemóvel" else "email", "value": tc.get('valor')}
                 for tc in con.get('telecom', [])
             ]
-            con_addresses = [
-                {"use": "home" if addr.get('tipo') == "casa" else "work", "line": [addr.get('valor')]}
-                for addr in con.get('endereco', [])
-            ]
+            addr = con.get('endereco')
+            con_addresses = {"use": "home" if addr.get('tipo') == "casa" else "work", "line": [addr.get('valor')]}
             fhir_contacts.append({
                 "relationship": [{"text": "Emergency Contact"}],
                 "name": {"family": con.get('nome')},
@@ -244,10 +282,17 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                     (contacto_id, tel_con.get('tipo'), tel_con.get('valor'))
                 )
             
-            for end in con.get('endereco', []):
+            end_obj = con.get('endereco')
+
+            # 2. Só insere no SQL se o endereço existir no JSON
+            if end_obj and isinstance(end_obj, dict):
                 cur.execute(
                     "INSERT INTO endereco (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
-                    (contacto_id, end.get('tipo'), end.get('valor'))
+                    (
+                        contacto_id, 
+                        end_obj.get('tipo'), # Agora funciona porque end_obj é o dicionário
+                        end_obj.get('valor')
+                    )
                 )
 
         conn.commit() # Grava tudo localmente com segurança
@@ -557,6 +602,11 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
         fhir_payload = {
             "resourceType": "Encounter",
             "status": "finished",
+            "class": {
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                "code": "AMB", 
+                "display": "ambulatory"
+            },
             "subject": {"reference": f"Patient/{fhir_id_paciente}"},
             "participant": lista_participantes,
             "period": {"start": data.get('data_consulta')},

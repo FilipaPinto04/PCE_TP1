@@ -10,7 +10,7 @@
     ],
     "text": "Oxygen saturation"
   },
-  "refer": "Patient/89980748",
+  "refer": "Patient/1",
   "dataExecucao": "2026-02-10T03:54:00Z",
   "medicao": {
     "valor": 97,

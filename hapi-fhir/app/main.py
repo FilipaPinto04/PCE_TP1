@@ -21,7 +21,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # Configurações EHRbase
-EHRBASE_URL = os.getenv("EHRBASE_URL", "http://ehrbase:8081/ehrbase/rest/openehr/v1")
+EHRBASE_URL = "http://ehrbase:8080/ehrbase/rest/openehr/v1"  #  Correto!
 EHRBASE_USER = "admin-user"
 EHRBASE_PASS = "RequirementPassword"
 # Autenticação básica para o EHRbase
@@ -31,16 +31,16 @@ EHR_AUTH = (EHRBASE_USER, EHRBASE_PASS)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-FHIR_SERVER_URL = os.getenv("FHIR_SERVER_URL", "http://localhost:9000/fhir")
+FHIR_SERVER_URL = "http://fhir:8080/fhir"  #  Correto!
 
 def get_db_connection():
     # Credenciais iguais às do docker-compose
     return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", 5432),
-        database=os.getenv("DB_NAME", "tp1"),
-        user=os.getenv("DB_USER", "admin"),
-        password=os.getenv("DB_PASS", "admin")
+        host="db",  
+        port=5432,
+        database="tp1",
+        user="admin",
+        password="admin"
     )
 
 """def init_db():
@@ -131,27 +131,64 @@ def validar_recurso_fhir(recurso_json, tipo_recurso):
 # Evento de ciclo de vida que corre automaticamente quando o FastAPI inicia    
 
 def get_or_create_ehr(numero_utente, patient_fhir_id):
-    # 1. Procurar EHR por subject_id (SNS)
-    search_url = f"{EHRBASE_URL}/ehr?subject_id={numero_utente}&subject_namespace=pt.sns.utente"
-    res = requests.get(search_url, auth=EHR_AUTH)
-    
+    # Forçamos a pesquisa a usar o MESMO ID que usamos na criação (patient_fhir_id, ex: 1000)
+    # Procurar com o namespace de traços (padrão)
+    search_url_1 = f"{EHRBASE_URL}/ehr?subject_id={patient_fhir_id}&subject_namespace=pt-sns-utente"
+    res = requests.get(search_url_1, auth=EHR_AUTH)
     if res.status_code == 200:
         return res.json()['ehr_id']['value']
+        
+    # Procurar com o namespace antigo de pontos (para compatibilidade de testes passados)
+    search_url_2 = f"{EHRBASE_URL}/ehr?subject_id={patient_fhir_id}&subject_namespace=pt.sns.utente"
+    res_legacy = requests.get(search_url_2, auth=EHR_AUTH)
+    if res_legacy.status_code == 200:
+        return res_legacy.json()['ehr_id']['value']
     
-    # 2. Se não existir, criar novo EHR com external_ref para o FHIR
+    # Se não existir de todo, criamos o EHR mapeado de forma coerente
     payload = {
-        "queryable": True,
-        "modifiable": True,
+        "_type": "EHR_STATUS",
+        "archetype_node_id": "openEHR-EHR-EHR_STATUS.generic.v1",
+        "name": {
+            "_type": "DV_TEXT",
+            "value": "EHR Status"
+        },
+        "is_queryable": True,
+        "is_modifiable": True,
         "subject": {
+            "_type": "PARTY_SELF",
             "external_ref": {
-                "id": {"_type": "GENERIC_ID", "value": patient_fhir_id, "scheme": "fhir"},
-                "namespace": "pt.sns.utente",
+                "_type": "PARTY_REF",
+                "id": {
+                    "_type": "GENERIC_ID", 
+                    "value": str(patient_fhir_id), 
+                    "scheme": "fhir"
+                },
+                "namespace": "pt-sns-utente",
                 "type": "PERSON"
             }
         }
     }
+    
     create_res = requests.post(f"{EHRBASE_URL}/ehr", json=payload, auth=EHR_AUTH)
-    return create_res.json()['ehr_id']['value']
+    
+    if create_res.status_code in [200, 201]:
+        if 'Location' in create_res.headers:
+            return create_res.headers['Location'].split('/')[-1]
+        elif 'ETag' in create_res.headers:
+            return create_res.headers['ETag'].replace('"', '')
+        return create_res.json()['ehr_id']['value']
+        
+    # Se mesmo assim houver uma colisão de 409 devido a cache, extraímos o EHR existente
+    if create_res.status_code == 409:
+        retry = requests.get(search_url_1, auth=EHR_AUTH)
+        if retry.status_code == 200:
+            return retry.json()['ehr_id']['value']
+        retry_legacy = requests.get(search_url_2, auth=EHR_AUTH)
+        if retry_legacy.status_code == 200:
+            return retry_legacy.json()['ehr_id']['value']
+
+    print(f"❌ Erro crítico do EHRbase: {create_res.text}")
+    raise Exception(f"EHRbase devolveu status {create_res.status_code}: {create_res.text}")
 
 def upload_template():
     """Tenta fazer o upload do template .opt para o EHRbase"""
@@ -177,6 +214,205 @@ def upload_template():
         except Exception:
             print(f"⚠️ EHRbase ainda não responde... (Tentativa {i+1}/10)")
         time.sleep(5)
+
+# Mapeamento baseado no requisito 4.1 do enunciado 
+MAPA_SINAIS_VITAIS = {
+    "8480-6": {
+        "nome": "Pressão arterial sistólica", 
+        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
+        "node": "at0004"
+    },
+    "8462-4": {
+        "nome": "Pressão arterial diastólica", 
+        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
+        "node": "at0005"
+    },
+    "8867-4": {
+        "nome": "Frequência cardíaca", 
+        "archetype": "openEHR-EHR-OBSERVATION.pulse.v1", 
+        "node": "at0004"
+    },
+    "8310-5": {
+        "nome": "Temperatura corporal", 
+        "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v1", 
+        "node": "at0004"
+    },
+    "59408-5": {
+        "nome": "Saturação de oxigénio", 
+        "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1", 
+        "node": "at0004"
+    },
+    "29463-7": {
+        "nome": "Peso corporal", 
+        "archetype": "openEHR-EHR-OBSERVATION.body_weight.v1", 
+        "node": "at0004"
+    },
+    "9279-1": {
+        "nome": "Frequência respiratória", 
+        "archetype": "openEHR-EHR-OBSERVATION.respiration.v1", 
+        "node": "at0004"
+    }
+}
+
+def build_openehr_composition(fhir_payload, current_user):
+    # Extrair os dados do FHIR payload para mapear
+    valor_medicao = fhir_payload['valueQuantity']['value']
+    data_execucao = fhir_payload['effectiveDateTime']
+    
+    # Montar a composição com a estrutura RM openEHR estrita
+    composition = {
+        "_type": "COMPOSITION",
+        "archetype_node_id": "openEHR-EHR-COMPOSITION.encounter.v1",
+        "name": {
+            "_type": "DV_TEXT",
+            "value": "Encounter"
+        },
+        "archetype_details": {
+            "_type": "ARCHETYPED",
+            "archetype_id": {
+                "_type": "ARCHETYPE_ID",
+                "value": "openEHR-EHR-COMPOSITION.encounter.v1"
+            },
+            "template_id": {
+                "_type": "TEMPLATE_ID",
+                "value": "sinais_vitais"
+            },
+            "rm_version": "1.0.4"
+        },
+        "language": {
+            "_type": "CODE_PHRASE",
+            "terminology_id": {
+                "_type": "TERMINOLOGY_ID",
+                "value": "ISO_639-1"
+            },
+            "code_string": "pt"
+        },
+        "territory": {
+            "_type": "CODE_PHRASE",
+            "terminology_id": {
+                "_type": "TERMINOLOGY_ID",
+                "value": "ISO_3166-1"
+            },
+            "code_string": "PT"
+        },
+        "category": {
+            "_type": "DV_CODED_TEXT",
+            "value": "event",
+            "defining_code": {
+                "_type": "CODE_PHRASE",
+                "terminology_id": {
+                    "_type": "TERMINOLOGY_ID",
+                    "value": "openehr"
+                },
+                "code_string": "433"
+            }
+        },
+        "composer": {
+            "_type": "PARTY_IDENTIFIED",
+            "name": str(current_user)
+        },
+        "context": {
+            "_type": "EVENT_CONTEXT",
+            "start_time": {
+                "_type": "DV_DATE_TIME",
+                "value": data_execucao
+            },
+            "setting": {
+                "_type": "DV_CODED_TEXT",
+                "value": "secondary medical care",
+                "defining_code": {
+                    "_type": "CODE_PHRASE",
+                    "terminology_id": {
+                        "_type": "TERMINOLOGY_ID",
+                        "value": "openehr"
+                    },
+                    "code_string": "232"
+                }
+            }
+        },
+        "content": [
+            {
+                "_type": "OBSERVATION",
+                "archetype_node_id": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1",
+                "name": {
+                    "_type": "DV_TEXT",
+                    "value": "Oximetria de pulso"
+                },
+                "language": {
+                    "_type": "CODE_PHRASE",
+                    "terminology_id": {
+                        "_type": "TERMINOLOGY_ID",
+                        "value": "ISO_639-1"
+                    },
+                    "code_string": "pt"
+                },
+                # Forçamos o padrão Unicode universal do openEHR, que o Archie aceita sem verificar o dicionário IANA
+                "encoding": {
+                    "_type": "CODE_PHRASE",
+                    "terminology_id": {
+                        "_type": "TERMINOLOGY_ID",
+                        "value": "openehr"
+                    },
+                    "code_string": "Unicode"
+                },
+                "subject": {
+                    "_type": "PARTY_SELF"
+                },
+                "data": {
+                    "_type": "HISTORY",
+                    "archetype_node_id": "at0001",
+                    "name": {
+                        "_type": "DV_TEXT",
+                        "value": "Event series"
+                    },
+                    "origin": {
+                        "_type": "DV_DATE_TIME",
+                        "value": data_execucao
+                    },
+                    "events": [
+                        {
+                            "_type": "POINT_EVENT",
+                            "archetype_node_id": "at0002",
+                            "name": {
+                                "_type": "DV_TEXT",
+                                "value": "Qualquer evento"
+                            },
+                            "time": {
+                                "_type": "DV_DATE_TIME",
+                                "value": data_execucao
+                            },
+                            "data": {
+                                "_type": "ITEM_TREE",
+                                "archetype_node_id": "at0003",
+                                "name": {
+                                    "_type": "DV_TEXT",
+                                    "value": "List"
+                                },
+                                "items": [
+                                    {
+                                        "_type": "ELEMENT",
+                                        "archetype_node_id": "at0006",
+                                        "name": {
+                                            "_type": "DV_TEXT",
+                                            "value": "SpO₂"
+                                        },
+                                        "value": {
+                                            "_type": "DV_PROPORTION",
+                                            "numerator": float(valor_medicao),
+                                            "denominator": 100.0,
+                                            "type": 2
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    return composition
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -344,7 +580,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                     "INSERT INTO endereco (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
                     (
                         contacto_id, 
-                        end_obj.get('tipo'), # Agora funciona porque end_obj é o dicionário
+                        end_obj.get('tipo'), 
                         end_obj.get('valor')
                     )
                 )
@@ -354,6 +590,9 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
         # enviar para o hapi
         hapi_url = f"{FHIR_SERVER_URL}/Patient"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
+        
+        ehrbase_status = "Pendente (HAPI Falhou)"
+        ehr_id_gerado = None
 
         try:
             hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=10)
@@ -368,20 +607,41 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                 )
                 conn.commit()
                 
+                # -----------------------------------------------------------------
+                # Sincronização openEHR: Garante a criação da ficha clínica no EHRbase
+                # -----------------------------------------------------------------
+                try:
+                    # Usamos o ID local do doente como a chave de Utente no namespace do EHRbase
+                    ehr_id_gerado = get_or_create_ehr(str(paciente_id_local), str(fhir_id_gerado))
+                    ehrbase_status = "Sincronizado"
+                except Exception as ehr_err:
+                    ehrbase_status = f"Erro ao criar no openEHR: {str(ehr_err)}"
+                
                 return {
                     "status": "sucesso",
                     "id_local": paciente_id_local,
                     "id_fhir": fhir_id_gerado,
+                    "sincronizacao_openehr": {
+                        "status": ehrbase_status,
+                        "ehr_id": ehr_id_gerado
+                    }
                 }
             else:
                 return {
                     "status": "aviso",
                     "id_local": paciente_id_local,
                     "msg": "Gravado localmente, mas rejeitado pelo HAPI final.",
-                    "erro": hapi_res.text[:200]
+                    "erro": hapi_res.text[:200],
+                    "sincronizacao_openehr": {"status": ehrbase_status}
                 }
         except Exception as hapi_err:
-            return {"status": "aviso", "id_local": paciente_id_local, "msg": "SQL OK, HAPI offline.", "erro": str(hapi_err)}
+            return {
+                "status": "aviso", 
+                "id_local": paciente_id_local, 
+                "msg": "SQL OK, HAPI offline.", 
+                "erro": str(hapi_err),
+                "sincronizacao_openehr": {"status": "Pendente (HAPI Offline)"}
+            }
 
     except Exception as e:
         if conn: conn.rollback()
@@ -396,7 +656,9 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
 async def create_observation(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # preparação e tradução dos id
+        # ---------------------------------------------------------------------
+        # 1. Preparação e Tradução dos IDs locais
+        # ---------------------------------------------------------------------
         refer_string = data.get('refer', '')
         local_patient_id = int(refer_string.split('/')[-1]) if '/' in refer_string else None
 
@@ -406,8 +668,8 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Buscar o fhir_id do paciente no SQL
-        cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_patient_id,))
+        # Buscar o fhir_id e o nome do paciente no SQL (precisamos do fhir_id para o subject do FHIR)
+        cur.execute("SELECT fhir_id, nome FROM patients WHERE id = %s", (local_patient_id,))
         paciente_row = cur.fetchone()
 
         if not paciente_row or not paciente_row['fhir_id']:
@@ -418,7 +680,9 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
 
         fhir_patient_id = paciente_row['fhir_id']
 
-        # montar o payload e validar no hapi
+        # ---------------------------------------------------------------------
+        # 2. Montar o Payload FHIR original e Validar
+        # ---------------------------------------------------------------------
         obj_codigo = data.get('codigo', {})
         m = data.get('medicao', {})
         
@@ -433,7 +697,13 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         fhir_payload = {
             "resourceType": "Observation",
             "status": data.get('estado'),
-            "subject": {"reference": f"Patient/{fhir_patient_id}"},
+            "subject": {
+                "reference": f"Patient/{fhir_patient_id}",
+                "identifier": {  # Uma única chave estruturada
+                    "system": "http://minhaapi.local/identifiers/patient",
+                    "value": str(local_patient_id)
+                }
+            },
             "effectiveDateTime": data.get('dataExecucao'),
             "code": {
                 "coding": lista_codigos_fhir,
@@ -447,12 +717,13 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             }
         }
 
-        # validação do fhir (Se falhar, o código para e não grava no SQL)
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Observation")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro de Schema FHIR: {mensagem}")
         
-        # Inserir Observação
+        # ---------------------------------------------------------------------
+        # 3. Gravar dados nas tabelas relacionais do teu SQL Local
+        # ---------------------------------------------------------------------
         cur.execute(
             """INSERT INTO observacoes (paciente_id, estado, refer, dataExecucao) 
                VALUES (%s, %s, %s, %s) RETURNING id""",
@@ -460,14 +731,12 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         )
         obs_id = cur.fetchone()['id']
 
-        # Inserir Código
         cur.execute(
             "INSERT INTO codigo (observacoes_id, text) VALUES (%s, %s) RETURNING id",
             (obs_id, obj_codigo.get('text'))
         )
         codigo_id = cur.fetchone()['id']
 
-        # Inserir Codings
         for item in obj_codigo.get('coding', []):
             cur.execute(
                 """INSERT INTO coding (codigo_id, system, cod, disp) 
@@ -475,43 +744,84 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
                 (codigo_id, item.get('system'), item.get('cod'), item.get('disp'))
             )
 
-        # Inserir Medição
         cur.execute(
             """INSERT INTO medicao (observacoes_id, valor, unidade, sistema, cod) 
                VALUES (%s, %s, %s, %s, %s)""",
             (obs_id, m.get('valor'), m.get('unidade'), m.get('sistema'), m.get('cod'))
         )
         
-        conn.commit() # Confirmar gravação local
+        conn.commit() # Confirma gravação estruturada no SQL
 
-        # envio final para o hapi 
+        # ---------------------------------------------------------------------
+        # 4. Enviar para o HAPI FHIR
+        # ---------------------------------------------------------------------
         hapi_url = f"{FHIR_SERVER_URL}/Observation"
-        headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
+        headers_fhir = {"Content-Type": "application/fhir+json;charset=utf-8"}
+        fhir_obs_id = None
 
         try:
-            hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=10)
-            
+            hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers_fhir, timeout=5)
             if hapi_res.status_code in [200, 201]:
                 fhir_obs_id = hapi_res.json().get('id')
-                
-                # Atualizar o fhir_id gerado
-                cur.execute(
-                    "UPDATE observacoes SET fhir_id = %s WHERE id = %s",
-                    (str(fhir_obs_id), obs_id)
-                )
+                cur.execute("UPDATE observacoes SET fhir_id = %s WHERE id = %s", (str(fhir_obs_id), obs_id))
                 conn.commit()
-                
-                return {
-                    "status": "sucesso",
-                    "id_local": obs_id,
-                    "id_fhir": fhir_obs_id,
-                    "validação": "Passou no Schema FHIR"
-                }
             else:
-                return {"erro": "HAPI recusou", "detalhe": hapi_res.text}
-
+                print(f"⚠️ HAPI rejeitou a submissão: {hapi_res.text}")
         except Exception as hapi_err:
-            return {"status": "Aviso", "msg": "Gravado no SQL, mas HAPI offline", "erro": str(hapi_err)}
+            print(f"⚠️ Servidor HAPI FHIR offline: {hapi_err}")
+
+        # ---------------------------------------------------------------------
+        # 5. NOVO: Integração Automática com o openEHR (EHRbase)
+        # ---------------------------------------------------------------------
+        # Usamos o ID local ou um número de utente real para vincular ao EHR
+        utente_sns = str(local_patient_id) 
+        ehrbase_sync_status = "Não Sincronizado"
+        comp_uid = None
+
+        try:
+            # 5.1 Garantir que o doente tem um espaço EHR no EHRbase
+            ehr_id = get_or_create_ehr(utente_sns, fhir_patient_id)
+            
+            # 5.2 Mapear LOINC -> Composição openEHR
+            # Usamos o 'current_user' (quem está logado na API) como o compositor/médico
+            composition = build_openehr_composition(fhir_payload, current_user)
+            
+            if composition:
+                comp_url = f"{EHRBASE_URL}/ehr/{ehr_id}/composition"
+                comp_headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Prefer": "return=representation",
+                    "openEHR-VERSION": "1.0.4",
+                    "openEHR-AUDIT_DETAILS": "false"
+                }
+                # 5.3 Submeter ao EHRbase
+                res_ehr = requests.post(comp_url, json=composition, auth=EHR_AUTH, headers=comp_headers, timeout=5)
+                
+                if res_ehr.status_code in [200, 201]:
+                    ehrbase_sync_status = "Sucesso"
+                    comp_uid = res_ehr.json().get('uid', {}).get('value')
+                else:
+                    ehrbase_sync_status = f"Erro EHRbase ({res_ehr.status_code})"
+                    print(f"❌ TEXTO DE REJEIÇÃO DO EHRBASE (400): {res_ehr.text}")
+            else:
+                ehrbase_sync_status = "LOINC Não Suportado para openEHR"
+        except Exception as ehr_err:
+            ehrbase_sync_status = f"Falha na rede openEHR: {str(ehr_err)}"
+
+        # ---------------------------------------------------------------------
+        # 6. Resposta Unificada para o Postman
+        # ---------------------------------------------------------------------
+        return {
+            "status": "sucesso",
+            "id_local_sql": obs_id,
+            "id_fhir_hapi": fhir_obs_id if fhir_obs_id else "Falhou/Offline",
+            "sincronizacao_openehr": {
+                "status": ehrbase_sync_status,
+                "ehr_id": ehr_id if 'ehr_id' in locals() else None,
+                "composition_uid": comp_uid
+            }
+        }
 
     except Exception as e:
         if conn: conn.rollback()
@@ -1048,121 +1358,3 @@ async def get_patient_history(local_id: int, current_user: str = Depends(get_cur
     finally:
         if conn: conn.close()
 
-# Mapeamento baseado no requisito 4.1 do enunciado 
-MAPA_SINAIS_VITAIS = {
-    "8480-6": {
-        "nome": "Pressão arterial sistólica", 
-        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
-        "node": "at0004"
-    },
-    "8462-4": {
-        "nome": "Pressão arterial diastólica", 
-        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
-        "node": "at0005"
-    },
-    "8867-4": {
-        "nome": "Frequência cardíaca", 
-        "archetype": "openEHR-EHR-OBSERVATION.pulse.v1", 
-        "node": "at0004"
-    },
-    "8310-5": {
-        "nome": "Temperatura corporal", 
-        "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v1", 
-        "node": "at0004"
-    },
-    "59408-5": {
-        "nome": "Saturação de oxigénio", 
-        "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1", 
-        "node": "at0004"
-    },
-    "29463-7": {
-        "nome": "Peso corporal", 
-        "archetype": "openEHR-EHR-OBSERVATION.body_weight.v1", 
-        "node": "at0004"
-    },
-    "9279-1": {
-        "nome": "Frequência respiratória", 
-        "archetype": "openEHR-EHR-OBSERVATION.respiration.v1", 
-        "node": "at0004"
-    }
-}
-
-def build_openehr_composition(fhir_obs: dict, practitioner_name: str):
-    loinc = fhir_obs.get('code', {}).get('coding', [{}])[0].get('code')
-    info = MAPA_SINAIS_VITAIS.get(loinc)
-    
-    if not info:
-        print(f"⚠️ Código LOINC {loinc} não suportado no mapa.")
-        return None 
-
-    # Estrutura ajustada ao teu ficheiro .opt
-    return {
-        "_type": "COMPOSITION",
-        "name": {"_type": "DV_TEXT", "value": "Sinais Vitais"},
-        "archetype_details": {
-            "archetype_id": "openEHR-EHR-COMPOSITION.encounter.v1",
-            "template_id": "sinais_vitais", # Deve ser o ID que está no teu .opt
-            "rm_version": "1.0.4"
-        },
-        "language": {"code_string": "pt", "terminology_id": {"value": "ISO_639-1"}},
-        "territory": {"code_string": "PT", "terminology_id": {"value": "ISO_3166-1"}},
-        "category": {"value": "event", "defining_code": {"terminology_id": {"value": "openehr"}, "code_string": "433"}},
-        "composer": {"_type": "PARTY_IDENTIFIED", "name": practitioner_name}, 
-        "content": [{
-            "_type": "OBSERVATION",
-            "name": {"_type": "DV_TEXT", "value": info["nome"]},
-            "archetype_node_id": info["archetype"], # <--- MUDANÇA AQUI (Usa o arquétipo do mapa)
-            "data": {
-                "_type": "HISTORY",
-                "name": {"_type": "DV_TEXT", "value": "history"},
-                "origin": {"_type": "DV_DATE_TIME", "value": fhir_obs.get('effectiveDateTime')},
-                "events": [{
-                    "_type": "POINT_EVENT",
-                    "name": {"_type": "DV_TEXT", "value": "any event"},
-                    "time": {"_type": "DV_DATE_TIME", "value": fhir_obs.get('effectiveDateTime')},
-                    "data": {
-                        "_type": "ITEM_TREE",
-                        "name": {"_type": "DV_TEXT", "value": "tree"},
-                        "items": [{
-                            "_type": "ELEMENT",
-                            "name": {"_type": "DV_TEXT", "value": info["nome"]},
-                            "archetype_node_id": info["node"], # <--- at0004 ou at0005 conforme o mapa
-                            "value": {
-                                "_type": "DV_QUANTITY",
-                                "magnitude": fhir_obs.get('valueQuantity', {}).get('value'),
-                                "units": fhir_obs.get('valueQuantity', {}).get('unit')
-                            }
-                        }]
-                    }
-                }]
-            }
-        }]
-    }
-
-@app.post("/fhir-callback")
-async def fhir_callback(notification: dict):
-    # Extrair SNS (Fio condutor) [cite: 40, 53]
-    identifiers = notification.get('subject', {}).get('identifier', [])
-    sns = next((i['value'] for i in identifiers if i.get('system') == "https://www.sns.gov.pt/utente"), None)
-    
-    fhir_patient_id = notification.get('subject', {}).get('reference', '').split('/')[-1]
-    
-    # 1. Garantir que o doente tem um EHR [cite: 35, 54]
-    ehr_id = get_or_create_ehr(sns, fhir_patient_id)
-    
-    # 2. Obter nome do Practitioner (Requisito 4.3) [cite: 58, 59]
-    # Aqui deves fazer um GET ao HAPI FHIR para saber o nome do médico pelo ID no 'performer'
-    practitioner_name = "Dr. Desconhecido" # Idealmente fazes um GET ao HAPI aqui
-    
-    # 3. Mapeamento LOINC -> Composição [cite: 36, 66]
-    composition = build_openehr_composition(notification, practitioner_name)
-    
-    if not composition:
-        return {"status": "erro", "detail": "Código LOINC não suportado"}
-    
-    # 4. Submeter ao EHRbase [cite: 37, 66]
-    comp_url = f"{EHRBASE_URL}/ehr/{ehr_id}/composition"
-    headers = {"Prefer": "return=representation"}
-    res = requests.post(comp_url, json=composition, auth=EHR_AUTH, headers=headers)
-    
-    return {"status": "sincronizado", "ehr_id": ehr_id, "ehrbase_res": res.status_code}

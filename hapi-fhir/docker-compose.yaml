@@ -15,7 +15,7 @@ services:
     image: postgres:16
     container_name: hapi-postgres
     ports:
-      - "5433:5432"
+      - "5432:5432"
     environment:
       POSTGRES_DB: "tp1"
       POSTGRES_USER: "admin"
@@ -27,11 +27,13 @@ services:
     image: postgres:16
     container_name: ehrbase-postgres
     environment:
-      POSTGRES_DB: "ehrbase"
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "postgres"
+      - POSTGRES_DB=ehrbase
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
     ports:
       - "5434:5432"
+    volumes:
+      - ./init-ehr.sql:/docker-entrypoint-initdb.d/init-ehr.sql
 
   ehrbase:
     image: ehrbase/ehrbase:2.31.0
@@ -44,10 +46,8 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://ehrdb:5432/ehrbase
       SPRING_DATASOURCE_USERNAME: postgres
       SPRING_DATASOURCE_PASSWORD: postgres
-
       SPRING_FLYWAY_USER: postgres
       SPRING_FLYWAY_PASSWORD: postgres
-
       SECURITY_AUTHTYPE: none
 
   api:
@@ -56,14 +56,6 @@ services:
     ports:
       - "5000:5000"
     depends_on:
+      - db
       - fhir
       - ehrbase
-      - db
-    environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=tp1
-      - DB_USER=admin
-      - DB_PASS=admin
-      - EHRBASE_URL=http://ehrbase:8081/ehrbase/rest/openehr/v1
-      - FHIR_SERVER_URL=http://fhir:8080/fhir

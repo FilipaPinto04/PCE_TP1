@@ -218,81 +218,110 @@ def upload_template():
 # Mapeamento baseado no requisito 4.1 do enunciado 
 MAPA_SINAIS_VITAIS = {
     "8480-6": {
-        "nome": "Pressão arterial sistólica", 
-        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
-        "node": "at0004"
+        "nome": "Systolic",
+        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2",
+        "history_node": "at0001",
+        "event_node": "at0006",   # "Any event" no blood_pressure
+        "data_node": "at0003",
+        "item_node": "at0004",
+        "unidade": "mm[Hg]",
     },
     "8462-4": {
-        "nome": "Pressão arterial diastólica", 
-        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
-        "node": "at0005"
+        "nome": "Diastolic",
+        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2",
+        "history_node": "at0001",
+        "event_node": "at0006",
+        "data_node": "at0003",
+        "item_node": "at0005",
+        "unidade": "mm[Hg]",
     },
     "8867-4": {
-        "nome": "Frequência cardíaca", 
-        "archetype": "openEHR-EHR-OBSERVATION.pulse.v1", 
-        "node": "at0004"
+        "nome": "Rate",
+        "archetype": "openEHR-EHR-OBSERVATION.pulse.v2",
+        "history_node": "at0002",
+        "event_node": "at0003",   # "Any event" no pulse
+        "data_node": "at0001",
+        "item_node": "at0004",
+        "unidade": "/min",
     },
     "8310-5": {
-        "nome": "Temperatura corporal", 
-        "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v1", 
-        "node": "at0004"
+        "nome": "Temperature",
+        "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v2",
+        "history_node": "at0002",
+        "event_node": "at0003",   # "Any event" no body_temperature
+        "data_node": "at0001",
+        "item_node": "at0004",
+        "unidade": "Cel",
     },
     "59408-5": {
-        "nome": "Saturação de oxigénio", 
-        "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1", 
-        "node": "at0004"
+        "nome": "SpO₂",
+        "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1",
+        "history_node": "at0001",
+        "event_node": "at0002",   # "Any event" no pulse_oximetry
+        "data_node": "at0003",
+        "item_node": "at0006",
+        "unidade": "%",
     },
     "29463-7": {
-        "nome": "Peso corporal", 
-        "archetype": "openEHR-EHR-OBSERVATION.body_weight.v1", 
-        "node": "at0004"
+        "nome": "Weight",
+        "archetype": "openEHR-EHR-OBSERVATION.body_weight.v2",
+        "history_node": "at0002",
+        "event_node": "at0003",   # "Any event" no body_weight
+        "data_node": "at0001",
+        "item_node": "at0004",
+        "unidade": "kg",
     },
     "9279-1": {
-        "nome": "Frequência respiratória", 
-        "archetype": "openEHR-EHR-OBSERVATION.respiration.v1", 
-        "node": "at0004"
-    }
+        "nome": "Rate",
+        "archetype": "openEHR-EHR-OBSERVATION.respiration.v2",
+        "history_node": "at0001",
+        "event_node": "at0002",   # "Any event" no respiration
+        "data_node": "at0003",
+        "item_node": "at0004",
+        "unidade": "/min",
+    },
 }
 
+
 def build_openehr_composition(fhir_payload, current_user):
-    # Extrair os dados do FHIR payload para mapear
     valor_medicao = fhir_payload['valueQuantity']['value']
     data_execucao = fhir_payload['effectiveDateTime']
-    
-    # Montar a composição com a estrutura RM openEHR estrita
+
+    # Determinar o LOINC code
+    loinc_code = None
+    for coding in fhir_payload.get('code', {}).get('coding', []):
+        if coding.get('system') == 'http://loinc.org':
+            loinc_code = coding.get('code')
+            break
+
+    if loinc_code not in MAPA_SINAIS_VITAIS:
+        print(f"⚠️ LOINC {loinc_code} não suportado no mapa openEHR")
+        return None
+
+    info = MAPA_SINAIS_VITAIS[loinc_code]
+    unidade = fhir_payload['valueQuantity'].get('code', info.get('unidade', '1'))
+
     composition = {
         "_type": "COMPOSITION",
         "archetype_node_id": "openEHR-EHR-COMPOSITION.encounter.v1",
-        "name": {
-            "_type": "DV_TEXT",
-            "value": "Encounter"
-        },
+        "name": {"_type": "DV_TEXT", "value": "Encounter"},
         "archetype_details": {
             "_type": "ARCHETYPED",
             "archetype_id": {
                 "_type": "ARCHETYPE_ID",
                 "value": "openEHR-EHR-COMPOSITION.encounter.v1"
             },
-            "template_id": {
-                "_type": "TEMPLATE_ID",
-                "value": "sinais_vitais"
-            },
+            "template_id": {"_type": "TEMPLATE_ID", "value": "sinais_vitais"},
             "rm_version": "1.0.4"
         },
         "language": {
             "_type": "CODE_PHRASE",
-            "terminology_id": {
-                "_type": "TERMINOLOGY_ID",
-                "value": "ISO_639-1"
-            },
-            "code_string": "pt"
+            "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "ISO_639-1"},
+            "code_string": "en"   # ⚠️ O template tem language "en", não "pt"!
         },
         "territory": {
             "_type": "CODE_PHRASE",
-            "terminology_id": {
-                "_type": "TERMINOLOGY_ID",
-                "value": "ISO_3166-1"
-            },
+            "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "ISO_3166-1"},
             "code_string": "PT"
         },
         "category": {
@@ -300,32 +329,20 @@ def build_openehr_composition(fhir_payload, current_user):
             "value": "event",
             "defining_code": {
                 "_type": "CODE_PHRASE",
-                "terminology_id": {
-                    "_type": "TERMINOLOGY_ID",
-                    "value": "openehr"
-                },
+                "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "openehr"},
                 "code_string": "433"
             }
         },
-        "composer": {
-            "_type": "PARTY_IDENTIFIED",
-            "name": str(current_user)
-        },
+        "composer": {"_type": "PARTY_IDENTIFIED", "name": str(current_user)},
         "context": {
             "_type": "EVENT_CONTEXT",
-            "start_time": {
-                "_type": "DV_DATE_TIME",
-                "value": data_execucao
-            },
+            "start_time": {"_type": "DV_DATE_TIME", "value": data_execucao},
             "setting": {
                 "_type": "DV_CODED_TEXT",
                 "value": "secondary medical care",
                 "defining_code": {
                     "_type": "CODE_PHRASE",
-                    "terminology_id": {
-                        "_type": "TERMINOLOGY_ID",
-                        "value": "openehr"
-                    },
+                    "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "openehr"},
                     "code_string": "232"
                 }
             }
@@ -333,74 +350,51 @@ def build_openehr_composition(fhir_payload, current_user):
         "content": [
             {
                 "_type": "OBSERVATION",
-                "archetype_node_id": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1",
-                "name": {
-                    "_type": "DV_TEXT",
-                    "value": "Oximetria de pulso"
+                "archetype_node_id": info["archetype"],
+                "name": {"_type": "DV_TEXT", "value": info["nome"]},
+                "archetype_details": {
+                    "_type": "ARCHETYPED",
+                    "archetype_id": {
+                        "_type": "ARCHETYPE_ID",
+                        "value": info["archetype"]
+                    },
+                    "rm_version": "1.0.4"
                 },
                 "language": {
                     "_type": "CODE_PHRASE",
-                    "terminology_id": {
-                        "_type": "TERMINOLOGY_ID",
-                        "value": "ISO_639-1"
-                    },
-                    "code_string": "pt"
+                    "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "ISO_639-1"},
+                    "code_string": "en"
                 },
-                # Forçamos o padrão Unicode universal do openEHR, que o Archie aceita sem verificar o dicionário IANA
                 "encoding": {
                     "_type": "CODE_PHRASE",
-                    "terminology_id": {
-                        "_type": "TERMINOLOGY_ID",
-                        "value": "openehr"
-                    },
-                    "code_string": "Unicode"
+                    "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "IANA_character-sets"},
+                    "code_string": "UTF-8"
                 },
-                "subject": {
-                    "_type": "PARTY_SELF"
-                },
+                "subject": {"_type": "PARTY_SELF"},
                 "data": {
                     "_type": "HISTORY",
-                    "archetype_node_id": "at0001",
-                    "name": {
-                        "_type": "DV_TEXT",
-                        "value": "Event series"
-                    },
-                    "origin": {
-                        "_type": "DV_DATE_TIME",
-                        "value": data_execucao
-                    },
+                    "archetype_node_id": info["history_node"],  # era "at0001" fixo
+                    "name": {"_type": "DV_TEXT", "value": "History"},
+                    "origin": {"_type": "DV_DATE_TIME", "value": data_execucao},
                     "events": [
                         {
                             "_type": "POINT_EVENT",
-                            "archetype_node_id": "at0002",
-                            "name": {
-                                "_type": "DV_TEXT",
-                                "value": "Qualquer evento"
-                            },
-                            "time": {
-                                "_type": "DV_DATE_TIME",
-                                "value": data_execucao
-                            },
+                            "archetype_node_id": info["event_node"],  # era "at0006" fixo
+                            "name": {"_type": "DV_TEXT", "value": "Any event"},
+                            "time": {"_type": "DV_DATE_TIME", "value": data_execucao},
                             "data": {
                                 "_type": "ITEM_TREE",
-                                "archetype_node_id": "at0003",
-                                "name": {
-                                    "_type": "DV_TEXT",
-                                    "value": "List"
-                                },
+                                "archetype_node_id": info["data_node"],
+                                "name": {"_type": "DV_TEXT", "value": "Tree"},
                                 "items": [
                                     {
                                         "_type": "ELEMENT",
-                                        "archetype_node_id": "at0006",
-                                        "name": {
-                                            "_type": "DV_TEXT",
-                                            "value": "SpO₂"
-                                        },
+                                        "archetype_node_id": info["item_node"],
+                                        "name": {"_type": "DV_TEXT", "value": info["nome"]},
                                         "value": {
-                                            "_type": "DV_PROPORTION",
-                                            "numerator": float(valor_medicao),
-                                            "denominator": 100.0,
-                                            "type": 2
+                                            "_type": "DV_QUANTITY",   # ✅ DV_QUANTITY para todos
+                                            "magnitude": float(valor_medicao),
+                                            "units": unidade
                                         }
                                     }
                                 ]
@@ -412,7 +406,6 @@ def build_openehr_composition(fhir_payload, current_user):
         ]
     }
     return composition
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -654,6 +647,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
 
 @app.post("/Observation")
 async def create_observation(data: dict, current_user: str = Depends(get_current_user)):
+    print("👉 ALERTA: O pedido da Observation chegou ao meu código Python!")
     conn = None
     try:
         # ---------------------------------------------------------------------

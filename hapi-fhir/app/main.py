@@ -482,6 +482,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
 
 @app.post("/Observation")
 async def create_observation(data: dict, current_user: str = Depends(get_current_user)):
+    print("👉 ALERTA: O pedido da Observation chegou ao meu código Python!")
     conn = None
     try:
         refer_string = data.get('refer', '')

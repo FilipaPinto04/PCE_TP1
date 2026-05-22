@@ -1,17 +1,13 @@
 import psycopg2
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from psycopg2.extras import RealDictCursor
 import os
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
-from fastapi import Depends
-from contextlib import asynccontextmanager
-import requests
 import time
-
 
 app = FastAPI()
 
@@ -21,20 +17,18 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # Configurações EHRbase
-EHRBASE_URL = "http://ehrbase:8080/ehrbase/rest/openehr/v1"  #  Correto!
+EHRBASE_URL = "http://ehrbase:8080/ehrbase/rest/openehr/v1"
+EHRBASE_URL_ADMIN = "http://ehrbase:8080/ehrbase/rest/openehr/v1" # Alterado para a porta interna correta do endpoint REST
 EHRBASE_USER = "admin-user"
 EHRBASE_PASS = "RequirementPassword"
-# Autenticação básica para o EHRbase
 EHR_AUTH = (EHRBASE_USER, EHRBASE_PASS)
 
-# Para encriptar passwords e ler tokens
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-FHIR_SERVER_URL = "http://fhir:8080/fhir"  #  Correto!
+FHIR_SERVER_URL = "http://fhir:8080/fhir"
 
 def get_db_connection():
-    # Credenciais iguais às do docker-compose
     return psycopg2.connect(
         host="db",  
         port=5432,
@@ -43,108 +37,57 @@ def get_db_connection():
         password="admin"
     )
 
-"""def init_db():
-    conn = None
-    try:
-        # Estabelece a ligação ao PostgreSQL (Porta 5432 no Docker)
-        conn = get_db_connection()
-
-        # Localiza o ficheiro SQL que contém os comandos CREATE TABLE
-        schema_path = os.path.join(os.path.dirname(__file__), "../db/schema.sql")
-        
-        if os.path.exists(schema_path):
-            # Abre e lê o conteúdo do ficheiro schema.sql
-            with open(schema_path, "r", encoding="utf-8") as f:
-                sql_schema = f.read()
-            
-            # Executa o script SQL na base de dados e confirma as alterações (commit)
-            with conn.cursor() as cur:
-                cur.execute(sql_schema)
-                conn.commit()
-                print("Tabelas inicializadas com sucesso via schema.sql!")
-        else:
-            print("Ficheiro schema.sql não encontrado. Ignorando init_db.")
-            
-    except Exception as e:
-        # Captura erros de ligação ou de sintaxe no SQL
-        print(f"Erro ao inicializar base de dados: {e}")
-    finally:
-        # Garante que a ligação é fechada, independentemente de ter havido erro ou não
-        if conn:
-            conn.close()"""
-
-# Compara a password enviada pelo utilizador com a hash guardada no SQL
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
-# Transforma a password num código seguro (Hash) usando a biblioteca Passlib
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-# Gera o Token que o utilizador usará nos próximos pedidos
 def create_access_token(data: dict):
     to_encode = data.copy()
-    # Define o tempo de validade do token (ex: 30 minutos)
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    # Adiciona a data de expiração aos dados do token
     to_encode.update({"exp": expire})
-    # Assina o token com a tua SECRET_KEY para garantir que ninguém o consegue falsificar
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# Função assíncrona que garante que apenas utilizadores logados com um token válido conseguem aceder aos teus endpoints
 async def get_current_user(token: str = Depends(oauth2_scheme)):
-    # Define a exceção padrão para erros de autenticação (HTTP 401 Unauthorized)
     credentials_exception = HTTPException(
         status_code=401,
         detail="Não foi possível validar as credenciais",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # Tenta descodificar o token usando a SECRET_KEY e o Algoritmo
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        # Extrai o "sub" (Subject), que no neste caso guarda o username do utilizador
         username: str = payload.get("sub")
-        # Se o username não existir dentro do payload do token, o token é inválido
         if username is None:
             raise credentials_exception
         return username
-    # Se o JWT estiver mal formatado, expirado ou a assinatura for falsa, lança o erro 401
     except JWTError:
         raise credentials_exception
 
-# Função que submete um recurso ao endpoint de validação ($validate) do HAPI FHIR    
 def validar_recurso_fhir(recurso_json, tipo_recurso):
-    # Pergunta ao HAPI se o JSON é um recurso FHIR válido antes de o gravarmos.
     url_valida = f"{FHIR_SERVER_URL}/{tipo_recurso}/$validate"
     try:
         res = requests.post(url_valida, json=recurso_json, timeout=5)
         resultado = res.json()
         
-        # O HAPI devolve um OperationOutcome
         for issue in resultado.get('issue', []):
             if issue.get('severity') == 'error':
                 return False, issue.get('diagnostics')
         return True, "Válido"
     except Exception as e:
-        # Se o HAPI estiver offline, não conseguimos validar
         return False, f"Servidor de validação incontactável: {str(e)}"
-# Evento de ciclo de vida que corre automaticamente quando o FastAPI inicia    
 
 def get_or_create_ehr(numero_utente, patient_fhir_id):
-    # Forçamos a pesquisa a usar o MESMO ID que usamos na criação (patient_fhir_id, ex: 1000)
-    # Procurar com o namespace de traços (padrão)
     search_url_1 = f"{EHRBASE_URL}/ehr?subject_id={patient_fhir_id}&subject_namespace=pt-sns-utente"
     res = requests.get(search_url_1, auth=EHR_AUTH)
     if res.status_code == 200:
         return res.json()['ehr_id']['value']
         
-    # Procurar com o namespace antigo de pontos (para compatibilidade de testes passados)
     search_url_2 = f"{EHRBASE_URL}/ehr?subject_id={patient_fhir_id}&subject_namespace=pt.sns.utente"
     res_legacy = requests.get(search_url_2, auth=EHR_AUTH)
     if res_legacy.status_code == 200:
         return res_legacy.json()['ehr_id']['value']
     
-    # Se não existir de todo, criamos o EHR mapeado de forma coerente
     payload = {
         "_type": "EHR_STATUS",
         "archetype_node_id": "openEHR-EHR-EHR_STATUS.generic.v1",
@@ -178,7 +121,6 @@ def get_or_create_ehr(numero_utente, patient_fhir_id):
             return create_res.headers['ETag'].replace('"', '')
         return create_res.json()['ehr_id']['value']
         
-    # Se mesmo assim houver uma colisão de 409 devido a cache, extraímos o EHR existente
     if create_res.status_code == 409:
         retry = requests.get(search_url_1, auth=EHR_AUTH)
         if retry.status_code == 200:
@@ -191,16 +133,28 @@ def get_or_create_ehr(numero_utente, patient_fhir_id):
     raise Exception(f"EHRbase devolveu status {create_res.status_code}: {create_res.text}")
 
 def upload_template():
-    """Tenta fazer o upload do template .opt para o EHRbase"""
-    # URL administrativo para templates ADL 1.4
-    url = "http://ehrbase:8081/ehrbase/rest/openehr/v1/definition/template/adl1.4"
-    template_path = "app/templates/sinais_vitais.opt"
+    """Tenta fazer o upload do template .opt para o EHRbase usando caminhos absolutos"""
+    url = f"{EHRBASE_URL}/definition/template/adl1.4"
+    
+    # --- CORREÇÃO DE CAMINHO ABSOLUTO ---
+    # Descobre dinamicamente onde está o main.py (ex: /app) e junta com /templates
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    templates_dir = os.path.join(base_dir, "templates")
+    template_path = os.path.join(templates_dir, "sinais_vitais.opt")
+    
+    print(f"📁 A API está a procurar o template em: {template_path}")
     
     if not os.path.exists(template_path):
-        print(f"❌ Erro: Ficheiro {template_path} não encontrado!")
+        print(f"❌ Erro: O ficheiro {template_path} não existe fisicamente.")
+        # Diagnóstico: Vamos listar tudo o que está dentro da pasta para ver o nome real do ficheiro
+        try:
+            arquivos_encontrados = os.listdir(templates_dir)
+            print(f"🔍 Ficheiros que realmente existem dentro de {templates_dir}: {arquivos_encontrados}")
+        except Exception as e:
+            print(f"⚠️ Não foi possível listar a pasta de templates: {e}")
         return
 
-    # Loop de tentativa (o EHRbase demora a arrancar)
+    # Se o ficheiro existe, avança para o upload normal
     for i in range(30): 
         try:
             with open(template_path, "rb") as f:
@@ -210,217 +164,142 @@ def upload_template():
                     print("✅ Passo 1: Template openEHR carregado com sucesso!")
                     return
                 else:
-                    print(f"⚠️ Aguardando EHRbase... (Tentativa {i+1}/10)")
-        except Exception:
-            print(f"⚠️ EHRbase ainda não responde... (Tentativa {i+1}/10)")
+                    print(f"⚠️ Aguardando EHRbase... Status: {res.status_code} (Tentativa {i+1}/30)")
+        except Exception as e:
+            print(f"⚠️ EHRbase ainda não responde... ({str(e)}) (Tentativa {i+1}/30)")
         time.sleep(5)
 
-# Mapeamento baseado no requisito 4.1 do enunciado 
 MAPA_SINAIS_VITAIS = {
     "8480-6": {
-        "nome": "Pressão arterial sistólica", 
-        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
-        "node": "at0004"
+        "nome": "Blood pressure", 
+        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2", 
+        "node": "at0004" # Systolic
     },
     "8462-4": {
-        "nome": "Pressão arterial diastólica", 
-        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v1", 
-        "node": "at0005"
+        "nome": "Blood pressure", 
+        "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2", 
+        "node": "at0005" # Diastolic
     },
     "8867-4": {
-        "nome": "Frequência cardíaca", 
-        "archetype": "openEHR-EHR-OBSERVATION.pulse.v1", 
-        "node": "at0004"
+        "nome": "Pulse/Heart beat", 
+        "archetype": "openEHR-EHR-OBSERVATION.pulse.v2", 
+        "node": "at0004" # Rate
     },
     "8310-5": {
-        "nome": "Temperatura corporal", 
-        "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v1", 
-        "node": "at0004"
+        "nome": "Body temperature", 
+        "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v2", 
+        "node": "at0004" # Temperature
     },
     "59408-5": {
-        "nome": "Saturação de oxigénio", 
+        "nome": "Pulse oximetry", 
         "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1", 
-        "node": "at0004"
+        "node": "at0006" # Corrigido para bater com o teu template
     },
     "29463-7": {
-        "nome": "Peso corporal", 
-        "archetype": "openEHR-EHR-OBSERVATION.body_weight.v1", 
-        "node": "at0004"
+        "nome": "Body weight", 
+        "archetype": "openEHR-EHR-OBSERVATION.body_weight.v2", 
+        "node": "at0004" # Weight
     },
     "9279-1": {
-        "nome": "Frequência respiratória", 
-        "archetype": "openEHR-EHR-OBSERVATION.respiration.v1", 
-        "node": "at0004"
+        "nome": "Respiration", 
+        "archetype": "openEHR-EHR-OBSERVATION.respiration.v2", 
+        "node": "at0004" # Rate
     }
 }
 
-def build_openehr_composition(fhir_payload, current_user):
-    # Extrair os dados do FHIR payload para mapear
-    valor_medicao = fhir_payload['valueQuantity']['value']
-    data_execucao = fhir_payload['effectiveDateTime']
-    
-    # Montar a composição com a estrutura RM openEHR estrita
-    composition = {
-        "_type": "COMPOSITION",
-        "archetype_node_id": "openEHR-EHR-COMPOSITION.encounter.v1",
-        "name": {
-            "_type": "DV_TEXT",
-            "value": "Encounter"
-        },
-        "archetype_details": {
-            "_type": "ARCHETYPED",
-            "archetype_id": {
-                "_type": "ARCHETYPE_ID",
-                "value": "openEHR-EHR-COMPOSITION.encounter.v1"
-            },
-            "template_id": {
-                "_type": "TEMPLATE_ID",
-                "value": "sinais_vitais"
-            },
-            "rm_version": "1.0.4"
-        },
-        "language": {
-            "_type": "CODE_PHRASE",
-            "terminology_id": {
-                "_type": "TERMINOLOGY_ID",
-                "value": "ISO_639-1"
-            },
-            "code_string": "pt"
-        },
-        "territory": {
-            "_type": "CODE_PHRASE",
-            "terminology_id": {
-                "_type": "TERMINOLOGY_ID",
-                "value": "ISO_3166-1"
-            },
-            "code_string": "PT"
-        },
-        "category": {
-            "_type": "DV_CODED_TEXT",
-            "value": "event",
-            "defining_code": {
-                "_type": "CODE_PHRASE",
-                "terminology_id": {
-                    "_type": "TERMINOLOGY_ID",
-                    "value": "openehr"
-                },
-                "code_string": "433"
-            }
-        },
-        "composer": {
-            "_type": "PARTY_IDENTIFIED",
-            "name": str(current_user)
-        },
-        "context": {
-            "_type": "EVENT_CONTEXT",
-            "start_time": {
-                "_type": "DV_DATE_TIME",
-                "value": data_execucao
-            },
-            "setting": {
-                "_type": "DV_CODED_TEXT",
-                "value": "secondary medical care",
-                "defining_code": {
-                    "_type": "CODE_PHRASE",
-                    "terminology_id": {
-                        "_type": "TERMINOLOGY_ID",
-                        "value": "openehr"
-                    },
-                    "code_string": "232"
-                }
-            }
-        },
-        "content": [
-            {
-                "_type": "OBSERVATION",
-                "archetype_node_id": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1",
-                "name": {
-                    "_type": "DV_TEXT",
-                    "value": "Oximetria de pulso"
-                },
-                "language": {
-                    "_type": "CODE_PHRASE",
-                    "terminology_id": {
-                        "_type": "TERMINOLOGY_ID",
-                        "value": "ISO_639-1"
-                    },
-                    "code_string": "pt"
-                },
-                # Forçamos o padrão Unicode universal do openEHR, que o Archie aceita sem verificar o dicionário IANA
-                "encoding": {
-                    "_type": "CODE_PHRASE",
-                    "terminology_id": {
-                        "_type": "TERMINOLOGY_ID",
-                        "value": "openehr"
-                    },
-                    "code_string": "Unicode"
-                },
-                "subject": {
-                    "_type": "PARTY_SELF"
-                },
-                "data": {
-                    "_type": "HISTORY",
-                    "archetype_node_id": "at0001",
-                    "name": {
-                        "_type": "DV_TEXT",
-                        "value": "Event series"
-                    },
-                    "origin": {
-                        "_type": "DV_DATE_TIME",
-                        "value": data_execucao
-                    },
-                    "events": [
-                        {
-                            "_type": "POINT_EVENT",
-                            "archetype_node_id": "at0002",
-                            "name": {
-                                "_type": "DV_TEXT",
-                                "value": "Qualquer evento"
-                            },
-                            "time": {
-                                "_type": "DV_DATE_TIME",
-                                "value": data_execucao
-                            },
-                            "data": {
-                                "_type": "ITEM_TREE",
-                                "archetype_node_id": "at0003",
-                                "name": {
-                                    "_type": "DV_TEXT",
-                                    "value": "List"
-                                },
-                                "items": [
-                                    {
-                                        "_type": "ELEMENT",
-                                        "archetype_node_id": "at0006",
-                                        "name": {
-                                            "_type": "DV_TEXT",
-                                            "value": "SpO₂"
-                                        },
-                                        "value": {
-                                            "_type": "DV_PROPORTION",
-                                            "numerator": float(valor_medicao),
-                                            "denominator": 100.0,
-                                            "type": 2
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                }
-            }
-        ]
-    }
-    return composition
+def build_openehr_composition(fhir_payload: dict, current_user: str) -> dict:
+    try:
+        coding_list = fhir_payload.get("code", {}).get("coding", [])
+        if not coding_list:
+            return None
+        
+        codigo_loinc = coding_list[0].get("code")
+        
+        if codigo_loinc not in MAPA_SINAIS_VITAIS:
+            print(f"⚠️ Código LOINC {codigo_loinc} não mapeado.")
+            return None
+            
+        config = MAPA_SINAIS_VITAIS[codigo_loinc]
+        archetype = config["archetype"]
+        
+        valor = fhir_payload.get("valueQuantity", {}).get("value")
+        unidade = fhir_payload.get("valueQuantity", {}).get("unit")
+        data_execucao = fhir_payload.get("effectiveDateTime")
+        
+        if data_execucao and data_execucao.endswith('Z'):
+            data_execucao = data_execucao.replace('Z', '')
 
+        # FORMATO FLAT COM AS MAIÚSCULAS EXATAS EXIGIDAS PELO TEU TEMPLATE
+        composition = {
+            "ctx/language": "en",  
+            "ctx/territory": "DE", 
+            "ctx/composer_name": current_user,
+            "ctx/time": data_execucao,
+        }
+
+        # MAUÉSCULAS E ESPAÇOS ALINHADOS A 100% COM O TEU ESQUELETO /EXAMPLE
+        if codigo_loinc == "59408-5":
+            # Saturação de Oxigénio (pulse_oximetry.v1)
+            # Corrigido para "Any event:0" e "SpO₂" com o ₂ correto do unicode
+            composition[f"{archetype}/Any event:0/SpO₂|numerator"] = valor
+            composition[f"{archetype}/Any event:0/SpO₂|type"] = 3
+            composition[f"{archetype}/Any event:0/time"] = data_execucao
+            composition[f"{archetype}/origin"] = data_execucao
+            
+        elif codigo_loinc in ["8480-6", "8462-4"]:
+            # Pressão Arterial (blood_pressure.v2)
+            # No teu exemplo os sub-nós chamam-se "Systolic" e "Diastolic"
+            composition[f"{archetype}/Any event:0/time"] = data_execucao
+            composition[f"{archetype}/origin"] = data_execucao
+            if codigo_loinc == "8480-6":
+                composition[f"{archetype}/Any event:0/Systolic|magnitude"] = valor
+                composition[f"{archetype}/Any event:0/Systolic|units"] = unidade
+            else:
+                composition[f"{archetype}/Any event:0/Diastolic|magnitude"] = valor
+                composition[f"{archetype}/Any event:0/Diastolic|units"] = unidade
+
+        elif codigo_loinc == "8867-4":
+            # Frequência Cardíaca (pulse.v2)
+            # No teu exemplo chama-se "Rate" dentro de "Any event:0"
+            composition[f"{archetype}/Any event:0/Rate|magnitude"] = valor
+            composition[f"{archetype}/Any event:0/Rate|units"] = unidade
+            composition[f"{archetype}/Any event:0/time"] = data_execucao
+            composition[f"{archetype}/origin"] = data_execucao
+
+        elif codigo_loinc == "8310-5":
+            # Temperatura Corporal (body_temperature.v2)
+            # No teu exemplo chama-se "Temperature"
+            composition[f"{archetype}/Any event:0/Temperature|magnitude"] = valor
+            composition[f"{archetype}/Any event:0/Temperature|units"] = unidade
+            composition[f"{archetype}/Any event:0/time"] = data_execucao
+            composition[f"{archetype}/origin"] = data_execucao
+
+        elif codigo_loinc == "29463-7":
+            # Peso Corporal (body_weight.v2)
+            # No teu exemplo chama-se "Weight"
+            composition[f"{archetype}/Any event:0/Weight|magnitude"] = valor
+            composition[f"{archetype}/Any event:0/Weight|units"] = unidade
+            composition[f"{archetype}/Any event:0/time"] = data_execucao
+            composition[f"{archetype}/origin"] = data_execucao
+
+        elif codigo_loinc == "9279-1":
+            # Frequência Respiratória (respiration.v2)
+            # No teu exemplo chama-se "Rate"
+            composition[f"{archetype}/Any event:0/Rate|magnitude"] = valor
+            composition[f"{archetype}/Any event:0/Rate|units"] = unidade
+            composition[f"{archetype}/Any event:0/time"] = data_execucao
+            composition[f"{archetype}/origin"] = data_execucao
+        
+        return composition
+        
+    except Exception as e:
+        print(f"❌ Erro crítico ao construir composição openEHR: {e}")
+        return None
 
 @app.on_event("startup")
 async def startup_event():
-    print("--- Inicializando Middleware ---")
+    print("--- Inicializando Middleware e Templates ---")
     upload_template()
-
-    """print("--- Verificando SQL Local ---")
-    init_db()""" 
     
     print("--- Verificando Servidor FHIR ---")
     try:
@@ -428,37 +307,24 @@ async def startup_event():
         if res.status_code == 200:
             print("HAPI FHIR: Online e pronto.")
     except Exception:
-        print("HAPI FHIR: Servidor offline.")
-
-    print("--- Verificando Templates EHRbase ---")
-    opt_path = "templates/vital_signs.opt"
-    if os.path.exists(opt_path):
-        with open(opt_path, "rb") as f:
-            requests.post(f"{EHRBASE_URL}/definition/template/adl1.4", data=f, auth=EHR_AUTH)
-
-    
+        print("HAPI FHIR: Servidor offline ou a iniciar.")
 
 @app.post("/Register")
 async def register(data: dict):
     username = data.get("username")
     password = data.get("password")
-    
-    # Encriptar a password
     hashed_pw = pwd_context.hash(password) 
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Insere o par Username + Hash na tabela de utilizadores
         cur.execute(
             "INSERT INTO usuarios (username, password_hash) VALUES (%s, %s)",
             (username, hashed_pw)
         )
-        # Confirma a criação do novo utilizador
         conn.commit()
         return {"msg": "Utilizador criado! Agora já podes fazer login."}
     except Exception as e:
-        # Se o username já existir ou houver erro de ligação, anula a operação
         conn.rollback()
         return {"erro": str(e)}
     finally:
@@ -470,47 +336,32 @@ async def login(data: dict):
     password = data.get("password")
 
     conn = get_db_connection()
-    # RealDictCursor permite aceder aos campos pelo nome: user["password_hash"]
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    # Procura o utilizador na base de dados pelo username enviado
     cur.execute("SELECT * FROM usuarios WHERE username = %s", (username,))
     user = cur.fetchone()
     cur.close()
     conn.close()
 
-    # Verificação de existência: se o SELECT não devolver nada, o utilizador não existe
     if not user:
         raise HTTPException(status_code=401, detail="Utilizador não encontrado")
-    
-    # Verifica a password (compara o texto limpo com o hash do SQL)
     if not verify_password(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Password incorreta")
 
-    # Gerar o Token
     access_token = create_access_token(data={"sub": user["username"]})
-    
-    # este return é o que o postman vai mostrar 
-    return {
-        "access_token": access_token, 
-        "token_type": "bearer"
-    }
+    return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/Patient")
 async def create_patient(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # preparação dos dados e payload fhir 
         nome_paciente = data.get('nome', 'Sem Nome')
         genero_raw = data.get('genero', 'unknown')
 
-        # Preparar Telecoms do Paciente para o FHIR
         fhir_telecoms = [
             {"system": "phone" if t.get('tipo') == "telemóvel" else "email", "value": t.get('valor')}
             for t in data.get('telecom', [])
         ]
 
-        # Preparar Contactos para o FHIR
         fhir_contacts = []
         for con in data.get('contacto', []):
             con_telecoms = [
@@ -535,30 +386,25 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
             "contact": fhir_contacts
         }
 
-        # validação fhir 
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Patient")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro de Schema FHIR: {mensagem}")
 
-        # se estiver válido, insere no sql
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Inserir Paciente principal
         cur.execute(
             "INSERT INTO patients (nome, genero) VALUES (%s, %s) RETURNING id",
             (nome_paciente, genero_raw)
         )
         paciente_id_local = cur.fetchone()['id']
 
-        # Inserir Telecoms do Paciente
         for tel in data.get('telecom', []):
             cur.execute(
                 "INSERT INTO telecom (paciente_id, tipo, valor) VALUES (%s, %s, %s)",
                 (paciente_id_local, tel.get('tipo'), tel.get('valor'))
             )
 
-        # Inserir Contactos e seus detalhes
         for con in data.get('contacto', []):
             cur.execute(
                 "INSERT INTO contacto (paciente_id, nome) VALUES (%s, %s) RETURNING id",
@@ -573,45 +419,27 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                 )
             
             end_obj = con.get('endereco')
-
-            # 2. Só insere no SQL se o endereço existir no JSON
             if end_obj and isinstance(end_obj, dict):
                 cur.execute(
                     "INSERT INTO endereco (contacto_id, tipo, valor) VALUES (%s, %s, %s)",
-                    (
-                        contacto_id, 
-                        end_obj.get('tipo'), 
-                        end_obj.get('valor')
-                    )
+                    (contacto_id, end_obj.get('tipo'), end_obj.get('valor'))
                 )
 
-        conn.commit() # Grava tudo localmente com segurança
+        conn.commit()
 
-        # enviar para o hapi
         hapi_url = f"{FHIR_SERVER_URL}/Patient"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
-        
         ehrbase_status = "Pendente (HAPI Falhou)"
         ehr_id_gerado = None
 
         try:
             hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=10)
-            
             if hapi_res.status_code in [200, 201]:
                 fhir_id_gerado = hapi_res.json().get('id')
-                
-                # UPDATE DO fhir_id NO SQL
-                cur.execute(
-                    "UPDATE patients SET fhir_id = %s WHERE id = %s",
-                    (str(fhir_id_gerado), paciente_id_local)
-                )
+                cur.execute("UPDATE patients SET fhir_id = %s WHERE id = %s", (str(fhir_id_gerado), paciente_id_local))
                 conn.commit()
                 
-                # -----------------------------------------------------------------
-                # Sincronização openEHR: Garante a criação da ficha clínica no EHRbase
-                # -----------------------------------------------------------------
                 try:
-                    # Usamos o ID local do doente como a chave de Utente no namespace do EHRbase
                     ehr_id_gerado = get_or_create_ehr(str(paciente_id_local), str(fhir_id_gerado))
                     ehrbase_status = "Sincronizado"
                 except Exception as ehr_err:
@@ -656,9 +484,6 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
 async def create_observation(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # ---------------------------------------------------------------------
-        # 1. Preparação e Tradução dos IDs locais
-        # ---------------------------------------------------------------------
         refer_string = data.get('refer', '')
         local_patient_id = int(refer_string.split('/')[-1]) if '/' in refer_string else None
 
@@ -668,7 +493,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Buscar o fhir_id e o nome do paciente no SQL (precisamos do fhir_id para o subject do FHIR)
         cur.execute("SELECT fhir_id, nome FROM patients WHERE id = %s", (local_patient_id,))
         paciente_row = cur.fetchone()
 
@@ -680,9 +504,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
 
         fhir_patient_id = paciente_row['fhir_id']
 
-        # ---------------------------------------------------------------------
-        # 2. Montar o Payload FHIR original e Validar
-        # ---------------------------------------------------------------------
         obj_codigo = data.get('codigo', {})
         m = data.get('medicao', {})
         
@@ -699,7 +520,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             "status": data.get('estado'),
             "subject": {
                 "reference": f"Patient/{fhir_patient_id}",
-                "identifier": {  # Uma única chave estruturada
+                "identifier": {
                     "system": "http://minhaapi.local/identifiers/patient",
                     "value": str(local_patient_id)
                 }
@@ -721,9 +542,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro de Schema FHIR: {mensagem}")
         
-        # ---------------------------------------------------------------------
-        # 3. Gravar dados nas tabelas relacionais do teu SQL Local
-        # ---------------------------------------------------------------------
         cur.execute(
             """INSERT INTO observacoes (paciente_id, estado, refer, dataExecucao) 
                VALUES (%s, %s, %s, %s) RETURNING id""",
@@ -749,12 +567,8 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
                VALUES (%s, %s, %s, %s, %s)""",
             (obs_id, m.get('valor'), m.get('unidade'), m.get('sistema'), m.get('cod'))
         )
-        
-        conn.commit() # Confirma gravação estruturada no SQL
+        conn.commit()
 
-        # ---------------------------------------------------------------------
-        # 4. Enviar para o HAPI FHIR
-        # ---------------------------------------------------------------------
         hapi_url = f"{FHIR_SERVER_URL}/Observation"
         headers_fhir = {"Content-Type": "application/fhir+json;charset=utf-8"}
         fhir_obs_id = None
@@ -771,31 +585,24 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             print(f"⚠️ Servidor HAPI FHIR offline: {hapi_err}")
 
         # ---------------------------------------------------------------------
-        # 5. NOVO: Integração Automática com o openEHR (EHRbase)
+        # 5. Integração Automática com o openEHR (EHRbase)
         # ---------------------------------------------------------------------
-        # Usamos o ID local ou um número de utente real para vincular ao EHR
         utente_sns = str(local_patient_id) 
         ehrbase_sync_status = "Não Sincronizado"
         comp_uid = None
 
         try:
-            # 5.1 Garantir que o doente tem um espaço EHR no EHRbase
             ehr_id = get_or_create_ehr(utente_sns, fhir_patient_id)
-            
-            # 5.2 Mapear LOINC -> Composição openEHR
-            # Usamos o 'current_user' (quem está logado na API) como o compositor/médico
             composition = build_openehr_composition(fhir_payload, current_user)
             
             if composition:
-                comp_url = f"{EHRBASE_URL}/ehr/{ehr_id}/composition"
+                comp_url = f"{EHRBASE_URL}/ehr/{ehr_id}/composition?templateId=sinais_vitais&format=FLAT"
                 comp_headers = {
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    "Prefer": "return=representation",
-                    "openEHR-VERSION": "1.0.4",
-                    "openEHR-AUDIT_DETAILS": "false"
+                    "Prefer": "return=representation"
                 }
-                # 5.3 Submeter ao EHRbase
+                
                 res_ehr = requests.post(comp_url, json=composition, auth=EHR_AUTH, headers=comp_headers, timeout=5)
                 
                 if res_ehr.status_code in [200, 201]:
@@ -803,14 +610,30 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
                     comp_uid = res_ehr.json().get('uid', {}).get('value')
                 else:
                     ehrbase_sync_status = f"Erro EHRbase ({res_ehr.status_code})"
-                    print(f"❌ TEXTO DE REJEIÇÃO DO EHRBASE (400): {res_ehr.text}")
+                    print(f"❌ TEXTO DE REJEIÇÃO DO EHRBASE ({res_ehr.status_code}): {res_ehr.text}")
+                    raise HTTPException(
+                        status_code=res_ehr.status_code, 
+                        detail=f"EHRbase rejeitou a composição: {res_ehr.text}"
+                    )
             else:
-                ehrbase_sync_status = "LOINC Não Suportado para openEHR"
+                # Se a função build_openehr_composition devolveu None, avisa imediatamente no Postman
+                raise HTTPException(
+                    status_code=400, 
+                    detail="A tradução para openEHR falhou. Verifica se o LOINC enviado está mapeado no MAPA_SINAIS_VITAIS."
+                )
+                
         except Exception as ehr_err:
-            ehrbase_sync_status = f"Falha na rede openEHR: {str(ehr_err)}"
+            # Se for uma HTTPException lançada por nós, propaga para o Postman
+            if isinstance(ehr_err, HTTPException): 
+                raise ehr_err
+            # Se for um erro bruto de Python (ex: KeyError, NameError, etc.), mostra o erro real no Postman
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Erro interno no bloco openEHR: {str(ehr_err)}"
+            )
 
         # ---------------------------------------------------------------------
-        # 6. Resposta Unificada para o Postman
+        # 6. Resposta Unificada (Apenas chega aqui se der Sucesso Real)
         # ---------------------------------------------------------------------
         return {
             "status": "sucesso",
@@ -818,7 +641,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             "id_fhir_hapi": fhir_obs_id if fhir_obs_id else "Falhou/Offline",
             "sincronizacao_openehr": {
                 "status": ehrbase_sync_status,
-                "ehr_id": ehr_id if 'ehr_id' in locals() else None,
+                "ehr_id": ehr_id,
                 "composition_uid": comp_uid
             }
         }
@@ -832,29 +655,24 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             cur.close()
             conn.close()
 
-
 @app.post("/Practitioner")
 async def create_practitioner(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # preparação dos dados 
         nome_medico = data.get('nome', 'Médico Desconhecido')
         genero_raw = data.get('genero', 'unknown')
         especialidade = data.get('especialidade', 'Clínica Geral')
 
-        # Mapeamento de Contactos/Telecoms para o FHIR (extraído do primeiro contacto do JSON)
         fhir_telecoms = []
         fhir_addresses = []
         contactos_input = data.get('contacto', [])
 
         if contactos_input:
             primeiro_con = contactos_input[0]
-            # Prepara Telecoms (Lista)
             fhir_telecoms = [
                 {"system": "phone" if tc.get('tipo') == "telemóvel" else "email", "value": tc.get('valor')}
                 for tc in primeiro_con.get('telecom', [])
             ]
-            # Prepara Endereço (Objeto Único para Practitioner no FHIR)
             addr_in = primeiro_con.get('endereco')
             if addr_in and isinstance(addr_in, dict):
                 fhir_addresses = [{
@@ -872,12 +690,10 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
             "qualification": [{"code": {"text": especialidade}}]
         }
 
-        # validação do fhir (Se falhar, o código para e não grava no SQL)
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Practitioner")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro no Schema Practitioner: {mensagem}")
 
-        # inserir no sql
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
@@ -887,7 +703,6 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
         )
         medico_id_local = cur.fetchone()['id']
 
-        # Tabela 'contacto', 'telecom' e 'endereco'
         for con in contactos_input:
             cur.execute(
                 "INSERT INTO contacto (medico_id, nome) VALUES (%s, %s) RETURNING id",
@@ -895,14 +710,12 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
             )
             c_id = cur.fetchone()['id']
             
-            # Telecoms do contacto
             for t in con.get('telecom', []):
                 cur.execute(
                     "INSERT INTO telecom (contacto_id, medico_id, tipo, valor) VALUES (%s, %s, %s, %s)",
                     (c_id, medico_id_local, t.get('tipo'), t.get('valor'))
                 )
             
-            # Endereço do contacto
             e_obj = con.get('endereco')
             if e_obj and isinstance(e_obj, dict):
                 cur.execute(
@@ -912,21 +725,14 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
 
         conn.commit()
 
-        # envio para o hapi 
         hapi_url = f"{FHIR_SERVER_URL}/Practitioner"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
 
         try:
             hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=10)
-
             if hapi_res.status_code in [200, 201]:
                 fhir_id_gerado = hapi_res.json().get('id')
-
-                # Atualizar o fhir_id no SQL para manter a sincronização
-                cur.execute(
-                    "UPDATE medicos SET fhir_id = %s WHERE id = %s",
-                    (str(fhir_id_gerado), medico_id_local)
-                )
+                cur.execute("UPDATE medicos SET fhir_id = %s WHERE id = %s", (str(fhir_id_gerado), medico_id_local))
                 conn.commit()
 
                 return {
@@ -959,12 +765,10 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
             cur.close()
             conn.close()
 
-
 @app.post("/Encounter")
 async def create_encounter(data: dict, current_user: str = Depends(get_current_user)):
     conn = None
     try:
-        # Extração dos IDs locais
         ref_paciente_local = data.get('refer_paciente', '')
         id_paciente_sql = int(ref_paciente_local.split('/')[-1]) if '/' in ref_paciente_local else None
 
@@ -974,18 +778,15 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
         if not id_paciente_sql:
             raise HTTPException(status_code=400, detail="Referência de paciente inválida.")
 
-        # tradução de ids 
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Buscar fhir_id do Paciente
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (id_paciente_sql,))
         row_p = cur.fetchone()
         if not row_p or not row_p['fhir_id']:
             raise HTTPException(status_code=400, detail="Paciente local não sincronizado com HAPI.")
         fhir_id_paciente = row_p['fhir_id']
 
-        # Buscar fhir_id do Médico 
         fhir_id_medico = None
         if id_medico_sql:
             cur.execute("SELECT fhir_id FROM medicos WHERE id = %s", (id_medico_sql,))
@@ -993,7 +794,6 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             if row_m and row_m['fhir_id']:
                 fhir_id_medico = row_m['fhir_id']
 
-        # preparar e validar payload 
         lista_participantes = []
         if fhir_id_medico:
             lista_participantes.append({
@@ -1014,14 +814,11 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             "type": [{"text": data.get('tipo_consulta')}]
         }
 
-        # validação fhir 
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Encounter")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro no Schema Encounter: {mensagem}")
 
-        # inserir no sql 
         try:
-            # Inserir consulta
             cur.execute(
                 """INSERT INTO consultas (paciente_id, medico_id, data_consulta, tipo_consulta) 
                    VALUES (%s, %s, %s, %s) RETURNING id""",
@@ -1029,7 +826,6 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             )
             consulta_id_local = cur.fetchone()['id']
 
-            # Inserir no histórico
             cur.execute(
                 "INSERT INTO historico (paciente_id, consulta_id) VALUES (%s, %s)",
                 (id_paciente_sql, consulta_id_local)
@@ -1039,21 +835,14 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             conn.rollback()
             raise HTTPException(status_code=500, detail=f"Erro ao gravar no SQL local: {str(sql_err)}")
 
-        # envio para o hapi 
         hapi_url = f"{FHIR_SERVER_URL}/Encounter"
         headers = {"Content-Type": "application/fhir+json;charset=utf-8"}
 
         try:
             hapi_res = requests.post(hapi_url, json=fhir_payload, headers=headers, timeout=10)
-            
             if hapi_res.status_code in [200, 201]:
                 fhir_id_gerado = hapi_res.json().get('id')
-
-                # Atualizar o fhir_id na tabela consultas
-                cur.execute(
-                    "UPDATE consultas SET fhir_id = %s WHERE id = %s",
-                    (str(fhir_id_gerado), consulta_id_local)
-                )
+                cur.execute("UPDATE consultas SET fhir_id = %s WHERE id = %s", (str(fhir_id_gerado), consulta_id_local))
                 conn.commit()
 
                 return {
@@ -1069,7 +858,6 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
                     "mensagem": "Gravado localmente, mas rejeitado pelo HAPI final.",
                     "erro": hapi_res.text[:200]
                 }
-
         except Exception as hapi_err:
             return {"status": "aviso", "id_local": consulta_id_local, "msg": "SQL OK, HAPI offline.", "erro": str(hapi_err)}
 
@@ -1082,15 +870,12 @@ async def create_encounter(data: dict, current_user: str = Depends(get_current_u
             cur.close()
             conn.close()
 
-
 @app.get("/Patient/{local_id}")
 async def get_patient(local_id: int, current_user: str = Depends(get_current_user)):
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Traduzir o ID local do paciente para o fhir_id do HAPI
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_id,))
         result = cur.fetchone()
 
@@ -1098,13 +883,10 @@ async def get_patient(local_id: int, current_user: str = Depends(get_current_use
             raise HTTPException(status_code=404, detail="Paciente não existe no SQL")
         
         fhir_id = result.get('fhir_id')
-        
         if not fhir_id:
-            raise HTTPException(status_code=404, detail="Paciente existe no SQL, mas não foi sincronizado com o HAPI")
+            raise HTTPException(status_code=404, detail="Paciente sem sincronização HAPI")
 
-        # Ir buscar ao HAPI usando o fhir_id
         hapi_url = f"{FHIR_SERVER_URL}/Patient/{fhir_id}"
-        
         headers = {"Accept": "application/fhir+json"}
         response = requests.get(hapi_url, headers=headers, timeout=5)
 
@@ -1116,7 +898,6 @@ async def get_patient(local_id: int, current_user: str = Depends(get_current_use
             }
         else:
             raise HTTPException(status_code=response.status_code, detail="Erro ao buscar no HAPI")
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -1130,8 +911,6 @@ async def get_observation(local_id: int, current_user: str = Depends(get_current
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Traduzir o ID local do paciente para o fhir_id do HAPI
         cur.execute("SELECT fhir_id FROM observacoes WHERE id = %s", (local_id,))
         result = cur.fetchone()
 
@@ -1139,11 +918,9 @@ async def get_observation(local_id: int, current_user: str = Depends(get_current
             raise HTTPException(status_code=404, detail="Observação não encontrada no SQL")
         
         fhir_id = result.get('fhir_id')
-        
         if not fhir_id:
-            raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR (fhir_id é null)")
+            raise HTTPException(status_code=404, detail="Observação sem mapeamento FHIR")
 
-        # Ir buscar ao HAPI usando o fhir_id
         hapi_url = f"{FHIR_SERVER_URL}/Observation/{fhir_id}"
         headers = {"Accept": "application/fhir+json"}
         response = requests.get(hapi_url, headers=headers, timeout=5)
@@ -1154,19 +931,13 @@ async def get_observation(local_id: int, current_user: str = Depends(get_current
                 "id_fhir": fhir_id,
                 "dados_provenientes_do_hapi": response.json()
             }
-        elif response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Observação não encontrada no servidor HAPI")
         else:
-            raise HTTPException(status_code=response.status_code, detail="Erro na comunicação com HAPI")
-
+            raise HTTPException(status_code=response.status_code, detail="Erro no HAPI")
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
+        if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if conn:
-            conn.close()
-
+        if conn: conn.close()
 
 @app.get("/Observation")
 async def get_patient_observations(patient: int, current_user: str = Depends(get_current_user)):
@@ -1174,35 +945,20 @@ async def get_patient_observations(patient: int, current_user: str = Depends(get
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Traduzir o ID local do paciente para o fhir_id do HAPI
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (patient,))
         res_paciente = cur.fetchone()
 
         if not res_paciente or not res_paciente['fhir_id']:
-            raise HTTPException(
-                status_code=404, 
-                detail="Paciente não encontrado ou não sincronizado com o HAPI"
-            )
+            raise HTTPException(status_code=404, detail="Paciente não encontrado ou não sincronizado")
 
         fhir_patient_id = res_paciente['fhir_id']
-
-        # Consultar o HAPI usando o filtro de paciente (?patient=ID)
         hapi_url = f"{FHIR_SERVER_URL}/Observation?patient={fhir_patient_id}"
-        
         headers = {"Accept": "application/fhir+json"}
         response = requests.get(hapi_url, headers=headers, timeout=5)
 
         if response.status_code == 200:
-            # O HAPI devolve lista de entradas
             fhir_data = response.json()
-            
-            # Extraímos apenas a lista de observações para ser mais fácil de ler
-            observacoes = []
-            if "entry" in fhir_data:
-                for entry in fhir_data["entry"]:
-                    observacoes.append(entry["resource"])
-
+            observacoes = [entry["resource"] for entry in fhir_data.get("entry", [])]
             return {
                 "id_local_paciente": patient,
                 "id_fhir_paciente": fhir_patient_id,
@@ -1210,20 +966,14 @@ async def get_patient_observations(patient: int, current_user: str = Depends(get
                 "lista_observacoes": observacoes
             }
         else:
-            raise HTTPException(
-                status_code=response.status_code, 
-                detail="Erro ao procurar observações no HAPI"
-            )
-
+            raise HTTPException(status_code=response.status_code, detail="Erro no HAPI")
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
+        if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
             cur.close()
             conn.close()
-
 
 @app.get("/Practitioner/{local_id}")
 async def get_practitioner(local_id: int, current_user: str = Depends(get_current_user)):
@@ -1231,50 +981,35 @@ async def get_practitioner(local_id: int, current_user: str = Depends(get_curren
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Procurar o fhir_id na tua tabela local 'medicos'
         cur.execute("SELECT fhir_id FROM medicos WHERE id = %s", (local_id,))
         result = cur.fetchone()
 
         if not result:
-            raise HTTPException(status_code=404, detail="Médico não existe no SQL local")
+            raise HTTPException(status_code=404, detail="Médico não existe no SQL")
 
         fhir_id = result.get('fhir_id')
-
         if not fhir_id:
-            raise HTTPException(status_code=404, detail="Médico local sem fhir_id (não sincronizado com o HAPI)")
+            raise HTTPException(status_code=404, detail="Médico não sincronizado")
 
-        # 2. Ir buscar ao HAPI os dados completos
         hapi_url = f"{FHIR_SERVER_URL}/Practitioner/{fhir_id}"
-        
         headers = {"Accept": "application/fhir+json"}
+        response = requests.get(hapi_url, headers=headers, timeout=5)
         
-        try:
-            response = requests.get(hapi_url, headers=headers, timeout=5)
-            
-            if response.status_code == 200:
-                return {
-                    "id_local": local_id,
-                    "id_fhir": fhir_id,
-                    "recurso_fhir_do_servidor": response.json()
-                }
-            elif response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Médico não encontrado no servidor HAPI")
-            else:
-                raise HTTPException(status_code=response.status_code, detail="Erro ao comunicar com HAPI")
-        
-        except Exception as hapi_err:
-            raise HTTPException(status_code=503, detail=f"Servidor HAPI incontactável: {str(hapi_err)}")
-
+        if response.status_code == 200:
+            return {
+                "id_local": local_id,
+                "id_fhir": fhir_id,
+                "recurso_fhir_do_servidor": response.json()
+            }
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Erro no HAPI")
     except Exception as e:
-        if isinstance(e, HTTPException): 
-            raise e
+        if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
             cur.close()
             conn.close()
-
 
 @app.get("/Encounter/{consulta_id}")
 async def get_encounter(consulta_id: int, current_user: str = Depends(get_current_user)):
@@ -1282,49 +1017,31 @@ async def get_encounter(consulta_id: int, current_user: str = Depends(get_curren
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Procurar o fhir_id na tua tabela local 'consultas'
         cur.execute("SELECT fhir_id FROM consultas WHERE id = %s", (consulta_id,))
         result = cur.fetchone()
 
         if not result:
-            raise HTTPException(status_code=404, detail="Consulta não encontrada no SQL local")
+            raise HTTPException(status_code=404, detail="Consulta não encontrada no SQL")
         
         fhir_id = result.get('fhir_id')
-        
         if not fhir_id:
-            raise HTTPException(
-                status_code=404, 
-                detail="Esta consulta existe no SQL, mas não tem um fhir_id (não foi sincronizada com o HAPI)"
-            )
+            raise HTTPException(status_code=404, detail="Consulta sem fhir_id")
 
-        # Ir buscar o recurso ao HAPI usando o fhir_id
         hapi_url = f"{FHIR_SERVER_URL}/Encounter/{fhir_id}"
-        
         headers = {"Accept": "application/fhir+json"}
+        response = requests.get(hapi_url, headers=headers, timeout=5)
         
-        try:
-            response = requests.get(hapi_url, headers=headers, timeout=5)
-            
-            if response.status_code == 200:
-                return {
-                    "id_local": consulta_id,
-                    "id_fhir_no_hapi": fhir_id,
-                    "recurso_fhir_completo": response.json()
-                }
-            elif response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Consulta não encontrada no servidor HAPI")
-            else:
-                raise HTTPException(status_code=response.status_code, detail="Erro na resposta do servidor HAPI")
-
-        except Exception as hapi_err:
-            raise HTTPException(status_code=503, detail=f"Servidor HAPI incontactável: {str(hapi_err)}")
-
+        if response.status_code == 200:
+            return {
+                "id_local": consulta_id,
+                "id_fhir_no_hapi": fhir_id,
+                "recurso_fhir_completo": response.json()
+            }
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Erro no HAPI")
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
-    
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
             cur.close()
@@ -1336,8 +1053,6 @@ async def get_patient_history(local_id: int, current_user: str = Depends(get_cur
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Descobrir qual é o ID do HAPI para este paciente
         cur.execute("SELECT fhir_id FROM patients WHERE id = %s", (local_id,))
         result = cur.fetchone()
         
@@ -1345,16 +1060,12 @@ async def get_patient_history(local_id: int, current_user: str = Depends(get_cur
             raise HTTPException(status_code=404, detail="Paciente não encontrado ou sem ID FHIR")
 
         fhir_id = result['fhir_id']
-
-        # Pedir ao HAPI todas as Observations deste subject
         hapi_url = f"{FHIR_SERVER_URL}/Observation?subject=Patient/{fhir_id}"
         response = requests.get(hapi_url)
 
         if response.status_code == 200:
-            return response.json() # Retorna o Bundle do FHIR com o histórico
+            return response.json()
         else:
             raise HTTPException(status_code=response.status_code, detail="Erro no HAPI")
-
     finally:
         if conn: conn.close()
-

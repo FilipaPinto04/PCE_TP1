@@ -80,27 +80,23 @@ def validar_recurso_fhir(recurso_json, tipo_recurso):
         return False, f"Servidor de validação incontactável: {str(e)}"
 
 def get_or_create_ehr(numero_utente, patient_fhir_id):
-    # 1. Definição clara dos URLs de pesquisa
-    search_url_sns = f"{EHRBASE_URL}/ehr?subject_id={numero_utente}&subject_namespace=pt.sns.utente"
-    search_url_legacy = f"{EHRBASE_URL}/ehr?subject_id={numero_utente}&subject_namespace=pt-sns-utente"
-    search_url_fhir = f"{EHRBASE_URL}/ehr?subject_id={patient_fhir_id}&subject_namespace=pt-sns-utente"
+    # Namespace com hífens — único formato aceite pelo regex do EHRbase
+    NAMESPACE = "pt-sns-utente"
 
-    # 2. Tentamos procurar pelo Número de Utente (SNS) - Formato com pontos
-    res = requests.get(search_url_sns, auth=EHR_AUTH)
+    search_url_sns  = f"{EHRBASE_URL}/ehr?subject_id={numero_utente}&subject_namespace={NAMESPACE}"
+    search_url_fhir = f"{EHRBASE_URL}/ehr?subject_id={patient_fhir_id}&subject_namespace={NAMESPACE}"
+
+    # Procurar pelo N.º de Utente
+    res = requests.get(search_url_sns)
     if res.status_code == 200:
         return res.json()['ehr_id']['value']
-        
-    # 4. Tentamos procurar pelo Número de Utente (SNS) - Formato com hífen
-    res_legacy = requests.get(search_url_legacy, auth=EHR_AUTH)
-    if res_legacy.status_code == 200:
-        return res_legacy.json()['ehr_id']['value']
 
-    # 4. Tentamos procurar pelo ID do FHIR
-    res_fhir = requests.get(search_url_fhir, auth=EHR_AUTH)
+    # Procurar pelo ID do FHIR
+    res_fhir = requests.get(search_url_fhir)
     if res_fhir.status_code == 200:
         return res_fhir.json()['ehr_id']['value']
-    
-    # 5. Se não existir em lado nenhum, criamos o EHR_STATUS
+
+    # Não existe — criar o EHR
     payload = {
         "_type": "EHR_STATUS",
         "archetype_node_id": "openEHR-EHR-EHR_STATUS.generic.v1",
@@ -115,32 +111,29 @@ def get_or_create_ehr(numero_utente, patient_fhir_id):
             "external_ref": {
                 "_type": "PARTY_REF",
                 "id": {
-                    "_type": "GENERIC_ID", 
-                    "value": str(patient_fhir_id), # Vínculo bidirecional (Patient.id do FHIR)
-                    "scheme": "fhir"
+                    "_type": "GENERIC_ID",
+                    "value": str(numero_utente),
+                    "scheme": "SNS"
                 },
-                "namespace": "pt-sns-utente", # Compatível com a Regex do EHRbase
+                "namespace": NAMESPACE,
                 "type": "PERSON"
             }
         }
     }
-    
-    create_res = requests.post(f"{EHRBASE_URL}/ehr", json=payload, auth=EHR_AUTH)
-    
+
+    create_res = requests.post(f"{EHRBASE_URL}/ehr", json=payload)
+
     if create_res.status_code in [200, 201]:
         if 'Location' in create_res.headers:
             return create_res.headers['Location'].split('/')[-1]
         elif 'ETag' in create_res.headers:
             return create_res.headers['ETag'].replace('"', '')
         return create_res.json()['ehr_id']['value']
-        
-    # ✅ CORREÇÃO CRÍTICA: Se der conflito 409, fazemos a recuperação forçada do EHR existente
+
     if create_res.status_code == 409:
-        print(f"⚠️ [EHR] Conflito 409 detetado para o ID {patient_fhir_id}. Recuperando EHR existente...")
-        
-        # Fazemos um varrimento de segurança nas rotas de busca para trazer o UUID antigo
-        for url in [search_url_fhir, search_url_legacy, search_url_sns]:
-            retry = requests.get(url, auth=EHR_AUTH)
+        print(f"⚠️ [EHR] Conflito 409 — recuperando EHR existente...")
+        for url in [search_url_sns, search_url_fhir]:
+            retry = requests.get(url)
             if retry.status_code == 200:
                 return retry.json()['ehr_id']['value']
 
@@ -170,8 +163,8 @@ def upload_template():
         try:
             with open(template_path, "rb") as f:
                 headers = {'Content-Type': 'application/xml'}
-                res = requests.post(url, data=f, auth=EHR_AUTH, headers=headers)
-                if res.status_code in [200, 201]:
+                res = requests.post(url, data=f, auth=None, headers=headers)
+                if res.status_code in [200, 201, 409]:
                     print("✅ Passo 1: Template openEHR carregado com sucesso!")
                     return
                 else:
@@ -382,10 +375,23 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
                         "origin": {"_type": "DV_DATE_TIME", "value": data_execucao},
                         "events": [
                             {
-                                "_type": "POINT_EVENT",
+                                "_type": "INTERVAL_EVENT",
                                 "archetype_node_id": info["event_node"],  
                                 "name": {"_type": "DV_TEXT", "value": "Any event"},
                                 "time": {"_type": "DV_DATE_TIME", "value": data_execucao},
+                                "width": {
+                                    "_type": "DV_DURATION",
+                                    "value": "PT10M"
+                                },
+                                "math_function": {
+                                    "_type": "DV_CODED_TEXT",
+                                    "value": "mean",
+                                    "defining_code": {
+                                        "_type": "CODE_PHRASE",
+                                        "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "openehr"},
+                                        "code_string": "146"
+                                    }
+                                },
                                 "data": {
                                     "_type": "ITEM_TREE",
                                     "archetype_node_id": info["data_node"],
@@ -444,67 +450,72 @@ async def fhir_polling_worker():
                         fhir_obs_id = resource.get("id")
                         
                         # =================================================================
-                        # REQUISITO 4.2: Gestão do EHR e Extração do N.º de Utente
+                        # REQUISITO 4.2: Extração Direta do N.º de Utente (subject.identifier)
                         # =================================================================
-                        subject_ref = resource.get("subject", {}).get("reference")
-                        if not subject_ref:
-                            print(f"⚠️ Observation {fhir_obs_id} sem referência de Patient. Ignorada.")
-                            continue
-                            
-                        # Passo 1: Obter o recurso Patient completo do HAPI FHIR (Arquitectura - pág. 2)
-                        res_patient = requests.get(f"{FHIR_SERVER_URL}/{subject_ref}", headers=headers, timeout=5)
-                        if res_patient.status_code != 200:
-                            print(f"❌ Não foi possível obter o Patient via {subject_ref}")
-                            continue
-                            
-                        patient_data = res_patient.json()
-                        fhir_patient_id = patient_data.get("id")
+                        subject = resource.get("subject", {})
+                        subject_ref = subject.get("reference", "")
+                        fhir_patient_id = subject_ref.split("/")[-1] if "/" in subject_ref else "Desconhecido"
                         
-                        # Extrair o N.º de Utente validando o sistema exato do enunciado
+                        # Extrair DIRETAMENTE da Observation, como o enunciado pede
                         utente_sns = None
-                        for identifier in patient_data.get("identifier", []):
-                            if identifier.get("system") == "https://www.sns.gov.pt/utente":
-                                utente_sns = identifier.get("value")
-                                break
-                                
-                        if not utente_sns:
-                            print(f"⚠️ Patient {fhir_patient_id} não possui o identifier com o sistema do SNS.")
-                            continue
+                        subject_identifier = subject.get("identifier", {})
+                        if subject_identifier.get("system") == "https://www.sns.gov.pt/utente":
+                            utente_sns = subject_identifier.get("value")
                             
-                        # Passo 2 e 3: Consultar/Criar EHR usando o subject_namespace exigido "pt.sns.utente"
+                        if not utente_sns:
+                            print(f"⚠️ Observation {fhir_obs_id} ignorada: Não tem N.º Utente do SNS no subject.identifier.")
+                            continue
+                        # Depois de extrair utente_sns e fhir_patient_id:
+                        if fhir_patient_id == "Desconhecido" and utente_sns:
+                            # Tentar encontrar o Patient no FHIR pelo N.º de Utente
+                            res_pt = requests.get(
+                                f"{FHIR_SERVER_URL}/Patient?identifier=https://www.sns.gov.pt/utente|{utente_sns}",
+                                headers=headers, timeout=5
+                            )
+                            if res_pt.status_code == 200:
+                                entries_pt = res_pt.json().get("entry", [])
+                                if entries_pt:
+                                    fhir_patient_id = entries_pt[0]["resource"]["id"]    
+                        # Consultar/Criar EHR 
                         try:
-                            # Passamos utente_sns (N.º Utente) e fhir_patient_id (Patient.id) para o vínculo bidirecional
                             ehr_id = get_or_create_ehr(str(utente_sns), str(fhir_patient_id))
                         except Exception as ehr_err:
                             print(f"❌ Erro na Gestão do EHR para o utente {utente_sns}: {ehr_err}")
                             continue
 
                         # =================================================================
-                        # REQUISITO 4.3: Gestão do Profissional de Saúde (Practitioner)
+                        # REQUISITO 4.3: Gestão do Practitioner 
                         # =================================================================
                         performers = resource.get("performer", [])
                         nome_medico = "Sistema Automático"
                         cedula_profissional = "Desconhecido"
                         
                         if performers:
-                            performer_ref = performers[0].get("reference")
-                            # Passo 1: Obter o recurso Practitioner real do HAPI FHIR
+                            performer = performers[0]
+                            performer_ref = performer.get("reference")
+                            
+                            # Fazemos o GET ao Practitioner para obter o Nome e a Cédula reais
                             res_practitioner = requests.get(f"{FHIR_SERVER_URL}/{performer_ref}", headers=headers, timeout=5)
                             
                             if res_practitioner.status_code == 200:
                                 practitioner_data = res_practitioner.json()
-                                nome_medico = practitioner_data.get("name", [{}])[0].get("text", "Médico")
+                                # Obter Nome
+                                names = practitioner_data.get("name", [])
+                                if names:
+                                    nome_medico = names[0].get("text", "Médico Desconhecido")
                                 
-                                # Extrair a Cédula através dos sistemas autorizados pela Ordem
+                                # Obter Cédula (Validando os sistemas da Ordem)
                                 for p_ident in practitioner_data.get("identifier", []):
                                     if p_ident.get("system") in ["https://www.ordemdosmedicos.pt", "https://www.ordemenfermeiros.pt"]:
                                         cedula_profissional = p_ident.get("value")
                                         break
-                        
+                                
+                                print(f"👤 [Practitioner] Profissional identificado: {nome_medico} | Cédula: {cedula_profissional} → será registado como PARTY_IDENTIFIED na composição")
+
                         # =================================================================
-                        # REQUISITO 4.4: Mapeamento e Submissão CANONICAL JSON
+                        # REQUISITO 4.4: Mapeamento e Submissão da Composição
                         # =================================================================
-                        # Construímos a composição passando o Nome do Médico e a sua Cédula real (PartyProxy)
+                        # O build_openehr_composition já cria o PartyProxy corretamente
                         composition = build_openehr_composition(resource, nome_medico, str(cedula_profissional))
                         
                         if composition:
@@ -515,17 +526,18 @@ async def fhir_polling_worker():
                                 "Prefer": "return=representation"
                             }
                             
-                            res_ehr = requests.post(comp_url, json=composition, auth=EHR_AUTH, headers=comp_headers, timeout=5)
+                            res_ehr = requests.post(comp_url, json=composition, auth=None, headers=comp_headers, timeout=5)
                             if res_ehr.status_code in [200, 201]:
                                 print(f"✅ [Polling] Composição gravada no EHRbase! UID: {res_ehr.json().get('uid', {}).get('value')}")
                             else:
                                 print(f"❌ [Polling] EHRbase rejeitou a composição: {res_ehr.text}")
                                 
-            if not entries:
-                ultima_verificacao = datetime.now(timezone.utc)
+                else:
+                    ultima_verificacao = datetime.now(timezone.utc)
 
         except Exception as err:
             print(f"⚠️ [Polling Worker] Ocorreu uma falha no ciclo: {err}")
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -589,7 +601,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
     try:
         nome_paciente = data.get('nome', 'Sem Nome')
         genero_raw = data.get('genero', 'unknown')
-
+        numero_utente = data.get('numero_utente', '')
         fhir_telecoms = [
             {"system": "phone" if t.get('tipo') == "telemóvel" else "email", "value": t.get('valor')}
             for t in data.get('telecom', [])
@@ -616,7 +628,13 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
             "name": [{"text": nome_paciente}],
             "gender": "male" if genero_raw == "m" else "female" if genero_raw == "f" else "unknown",
             "telecom": fhir_telecoms,
-            "contact": fhir_contacts
+            "contact": fhir_contacts,
+            "identifier": [
+                {
+                    "system": "https://www.sns.gov.pt/utente",
+                    "value": numero_utente
+                }
+            ]
         }
 
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Patient")
@@ -627,8 +645,8 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         cur.execute(
-            "INSERT INTO patients (nome, genero) VALUES (%s, %s) RETURNING id",
-            (nome_paciente, genero_raw)
+            "INSERT INTO patients (nome, genero, numero_utente) VALUES (%s, %s, %s) RETURNING id",
+            (nome_paciente, genero_raw, numero_utente)
         )
         paciente_id_local = cur.fetchone()['id']
 
@@ -673,7 +691,7 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
                 conn.commit()
                 
                 try:
-                    ehr_id_gerado = get_or_create_ehr(str(paciente_id_local), str(fhir_id_gerado))
+                    ehr_id_gerado = get_or_create_ehr(str(numero_utente), str(fhir_id_gerado))
                     ehrbase_status = "Sincronizado"
                 except Exception as ehr_err:
                     ehrbase_status = f"Erro ao criar no openEHR: {str(ehr_err)}"
@@ -740,7 +758,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        cur.execute("SELECT fhir_id, nome FROM patients WHERE id = %s", (local_patient_id,))
+        cur.execute("SELECT fhir_id, nome, numero_utente FROM patients WHERE id = %s", (local_patient_id,))
         paciente_row = cur.fetchone()
 
         if not paciente_row or not paciente_row['fhir_id']:
@@ -770,15 +788,15 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             "subject": {
                 "reference": f"Patient/{fhir_patient_id}",
                 "identifier": {
-                    "system": "http://minhaapi.local/identifiers/patient",
-                    "value": str(local_patient_id)
+                    "system": "https://www.sns.gov.pt/utente", # O URL exigido pelo enunciado
+                    "value": str(paciente_row['numero_utente'] or local_patient_id) # Para efeitos de teste, usamos o ID local como N.º SNS
                 }
             },
-            "effectiveDateTime": data.get('dataExecucao'),
-            "code": {
-                "coding": lista_codigos_fhir,
-                "text": obj_codigo.get('text')
-            },
+                "effectiveDateTime": data.get('dataExecucao'),
+                "code": {
+                    "coding": lista_codigos_fhir,
+                    "text": obj_codigo.get('text')
+                },
             "valueQuantity": {
                 "value": m.get('valor'),
                 "unit": m.get('unidade'),
@@ -848,7 +866,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         # ---------------------------------------------------------------------
         # 5. Integração Automática com o openEHR (EHRbase RM canónico)
         # ---------------------------------------------------------------------
-        utente_sns = fhir_payload.get('subject', {}).get('identifier', {}).get('value') 
+        '''utente_sns = fhir_payload.get('subject', {}).get('identifier', {}).get('value') 
         
         if not utente_sns:
             # Fallback de segurança caso o objeto identifier falhe por algum motivo
@@ -870,7 +888,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
                     "Prefer": "return=representation"
                 }
                 
-                res_ehr = requests.post(comp_url, json=composition, auth=EHR_AUTH, headers=comp_headers, timeout=5)
+                res_ehr = requests.post(comp_url, json=composition, auth=None, headers=comp_headers, timeout=5)
                 
                 if res_ehr.status_code in [200, 201]:
                     ehrbase_sync_status = "Sucesso"
@@ -894,20 +912,16 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             raise HTTPException(
                 status_code=500, 
                 detail=f"Erro interno no bloco openEHR: {str(ehr_err)}"
-            )
+            )'''
 
-        # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
         # 6. Resposta Unificada
         # ---------------------------------------------------------------------
         return {
             "status": "sucesso",
             "id_local_sql": obs_id,
             "id_fhir_hapi": fhir_obs_id if fhir_obs_id else "Falhou/Offline",
-            "sincronizacao_openehr": {
-                "status": ehrbase_sync_status,
-                "ehr_id": ehr_id,
-                "composition_uid": comp_uid
-            }
+            "msg": "Guardado no FHIR. O Polling enviará para o EHRbase em breve."
         }
 
     except Exception as e:
@@ -926,6 +940,7 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
         nome_medico = data.get('nome', 'Médico Desconhecido')
         genero_raw = data.get('genero', 'unknown')
         especialidade = data.get('especialidade', 'Clínica Geral')
+        cedula = data.get('cedula', '')
 
         fhir_telecoms = []
         fhir_addresses = []
@@ -951,7 +966,13 @@ async def create_practitioner(data: dict, current_user: str = Depends(get_curren
             "gender": "male" if genero_raw == "m" else "female" if genero_raw == "f" else "unknown",
             "telecom": fhir_telecoms,
             "address": fhir_addresses,
-            "qualification": [{"code": {"text": especialidade}}]
+            "qualification": [{"code": {"text": especialidade}}],
+            "identifier": [
+                {
+                    "system": "https://www.ordemdosmedicos.pt",
+                    "value": cedula
+                }
+            ]
         }
 
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Practitioner")

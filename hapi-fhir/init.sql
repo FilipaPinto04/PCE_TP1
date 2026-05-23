@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS patients (
     id SERIAL PRIMARY KEY,
     fhir_id VARCHAR(50),
     nome VARCHAR(255) NOT NULL,
-    genero CHAR(1)
+    genero CHAR(1),
+    numero_utente VARCHAR(50)
 );
 
 CREATE TABLE IF NOT EXISTS medicos (
@@ -18,7 +19,8 @@ CREATE TABLE IF NOT EXISTS medicos (
     fhir_id VARCHAR(50),      
     nome VARCHAR(255) NOT NULL,
     genero CHAR(1),
-    especialidade VARCHAR(100)
+    especialidade VARCHAR(100),
+    cedula VARCHAR(50)
 );
 
 CREATE TABLE IF NOT EXISTS contacto (

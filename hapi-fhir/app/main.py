@@ -9,6 +9,7 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 import time
 import asyncio
+import threading
 from fastapi import BackgroundTasks
 
 app = FastAPI()
@@ -175,11 +176,13 @@ def upload_template():
 
 # --- MERGE: Mapeamento baseado no requisito 4.1 do enunciado ---
 MAPA_SINAIS_VITAIS = {
+    # blood_pressure.v2: at0006 é EVENT genérico → POINT_EVENT aceite
     "8480-6": {
         "nome": "Systolic",
         "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2",
         "history_node": "at0001",
-        "event_node": "at0006",   # "Any event" no blood_pressure
+        "event_node": "at0006",
+        "event_type": "POINT_EVENT",
         "data_node": "at0003",
         "item_node": "at0004",
         "unidade": "mm[Hg]",
@@ -189,51 +192,62 @@ MAPA_SINAIS_VITAIS = {
         "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2",
         "history_node": "at0001",
         "event_node": "at0006",
+        "event_type": "POINT_EVENT",
         "data_node": "at0003",
         "item_node": "at0005",
         "unidade": "mm[Hg]",
     },
+    # pulse.v2: at0003 é INTERVAL_EVENT OBRIGATÓRIO no .opt (width + math_function obrigatórios)
     "8867-4": {
         "nome": "Rate",
         "archetype": "openEHR-EHR-OBSERVATION.pulse.v2",
         "history_node": "at0002",
-        "event_node": "at0003",   # "Any event" no pulse
+        "event_node": "at0003",
+        "event_type": "POINT_EVENT",
         "data_node": "at0001",
         "item_node": "at0004",
         "unidade": "/min",
     },
+    # body_temperature.v2: at0003 é EVENT genérico → POINT_EVENT aceite
     "8310-5": {
         "nome": "Temperature",
         "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v2",
         "history_node": "at0002",
-        "event_node": "at0003",   # "Any event" no body_temperature
+        "event_node": "at0003",
+        "event_type": "POINT_EVENT",
         "data_node": "at0001",
         "item_node": "at0004",
         "unidade": "Cel",
     },
+    # pulse_oximetry.v1: at0002 é EVENT genérico → POINT_EVENT aceite
     "59408-5": {
-        "nome": "SpO₂",
+        "nome": "SpO2",
         "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1",
         "history_node": "at0001",
-        "event_node": "at0002",   # "Any event" no pulse_oximetry
+        "event_node": "at0002",
+        "event_type": "POINT_EVENT",
         "data_node": "at0003",
         "item_node": "at0006",
         "unidade": "%",
     },
+    # body_weight.v2: at0003 é EVENT genérico → POINT_EVENT aceite
     "29463-7": {
         "nome": "Weight",
         "archetype": "openEHR-EHR-OBSERVATION.body_weight.v2",
         "history_node": "at0002",
-        "event_node": "at0003",   # "Any event" no body_weight
+        "event_node": "at0003",
+        "event_type": "POINT_EVENT",
         "data_node": "at0001",
         "item_node": "at0004",
         "unidade": "kg",
     },
+    # respiration.v2: at0002 é EVENT genérico → POINT_EVENT aceite
     "9279-1": {
         "nome": "Rate",
         "archetype": "openEHR-EHR-OBSERVATION.respiration.v2",
         "history_node": "at0001",
-        "event_node": "at0002",   # "Any event" no respiration
+        "event_node": "at0002",
+        "event_type": "POINT_EVENT",
         "data_node": "at0003",
         "item_node": "at0004",
         "unidade": "/min",
@@ -375,23 +389,23 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
                         "origin": {"_type": "DV_DATE_TIME", "value": data_execucao},
                         "events": [
                             {
-                                "_type": "INTERVAL_EVENT",
-                                "archetype_node_id": info["event_node"],  
+                                "_type": info.get("event_type", "POINT_EVENT"),
+                                "archetype_node_id": info["event_node"],
                                 "name": {"_type": "DV_TEXT", "value": "Any event"},
                                 "time": {"_type": "DV_DATE_TIME", "value": data_execucao},
-                                "width": {
-                                    "_type": "DV_DURATION",
-                                    "value": "PT10M"
-                                },
-                                "math_function": {
-                                    "_type": "DV_CODED_TEXT",
-                                    "value": "mean",
-                                    "defining_code": {
-                                        "_type": "CODE_PHRASE",
-                                        "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "openehr"},
-                                        "code_string": "146"
+                                # INTERVAL_EVENT (pulse.v2) requer width e math_function obrigatórios
+                                **({
+                                    "width": {"_type": "DV_DURATION", "value": "PT0S"},
+                                    "math_function": {
+                                        "_type": "DV_CODED_TEXT",
+                                        "value": "actual",
+                                        "defining_code": {
+                                            "_type": "CODE_PHRASE",
+                                            "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "openehr"},
+                                            "code_string": "640"
+                                        }
                                     }
-                                },
+                                } if info.get("event_type") == "INTERVAL_EVENT" else {}),
                                 "data": {
                                     "_type": "ITEM_TREE",
                                     "archetype_node_id": info["data_node"],
@@ -416,58 +430,84 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
         print(f"❌ Erro crítico ao construir composição openEHR: {e}")
         return None
 
-async def fhir_polling_worker():
+def _get_hapi_server_time() -> datetime:  # noqa
     """
-    Mecanismo de Activação por Polling Periódico (Requisito 4.5).
-    Consulta o HAPI FHIR regularmente, extrai identificadores clínicos reais
-    e persiste as composições de forma bidirecional no EHRbase.
+    Obtém o timestamp actual directamente do HAPI FHIR via cabeçalho Date da resposta.
+    Garante que o cursor de polling usa sempre o relógio do servidor HAPI,
+    eliminando desfasamentos entre o relógio do container Docker e o da máquina host.
+    Aplica uma margem de segurança de 5 segundos para trás para cobrir latências de rede.
+    """
+    try:
+        r = requests.get(f"{FHIR_SERVER_URL}/metadata", timeout=5)
+        date_header = r.headers.get("Date")
+        if date_header:
+            from email.utils import parsedate_to_datetime
+            server_time = parsedate_to_datetime(date_header)
+            return server_time - timedelta(seconds=5)
+    except Exception as e:
+        print(f"⚠️ [Polling] Não foi possível obter hora do HAPI — a usar hora local: {e}")
+    return datetime.now(timezone.utc) - timedelta(seconds=5)
+
+
+def fhir_polling_worker():
+    """
+    Polling periódico em thread dedicado — evita bloquear o event loop do asyncio.
+    Usa requests síncronos sem interferir com os endpoints FastAPI.
     """
     print("⏳ [Polling Worker] Inicializado e em conformidade estrita com o TP02...")
-    
-    # Checkpoint de tempo para capturar apenas dados novos
-    ultima_verificacao = datetime.now(timezone.utc)
 
+    # Aguardar HAPI FHIR ficar online
     while True:
         try:
-            await asyncio.sleep(15) # Intervalo regular definido pelo grupo (15s)
-            
+            r = requests.get(f"{FHIR_SERVER_URL}/metadata", timeout=3)
+            if r.status_code == 200:
+                print("✅ [Polling Worker] HAPI FHIR online — a iniciar polling.")
+                break
+        except Exception:
+            pass
+        print("⏳ [Polling Worker] Aguardando HAPI FHIR...")
+        time.sleep(10)
+
+    ultima_verificacao = _get_hapi_server_time()
+    print(f"🕐 [Polling] Checkpoint inicial (hora do HAPI): {ultima_verificacao.isoformat()}")
+
+    while True:
+        time.sleep(15)  # thread blocking — não afecta o event loop
+        try:
             iso_time = ultima_verificacao.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            print(f"🔍 [Polling] A verificar desde: {iso_time}")
+
             url_polling = f"{FHIR_SERVER_URL}/Observation?_lastUpdated=gt{iso_time}"
-            
             headers = {"Accept": "application/fhir+json"}
-            res = requests.get(url_polling, headers=headers, timeout=5)
-            
+            res = requests.get(url_polling, headers=headers, timeout=10)
+
+            novo_checkpoint = _get_hapi_server_time()
+
             if res.status_code == 200:
                 bundle = res.json()
                 entries = bundle.get("entry", [])
-                
+
                 if entries:
                     print(f"🔔 [Polling] Encontradas {len(entries)} novas Observations no HAPI FHIR!")
-                    ultima_verificacao = datetime.now(timezone.utc)
-                    
+
                     for entry in entries:
                         resource = entry.get("resource", {})
                         fhir_obs_id = resource.get("id")
-                        
-                        # =================================================================
-                        # REQUISITO 4.2: Extração Direta do N.º de Utente (subject.identifier)
-                        # =================================================================
+
                         subject = resource.get("subject", {})
                         subject_ref = subject.get("reference", "")
                         fhir_patient_id = subject_ref.split("/")[-1] if "/" in subject_ref else "Desconhecido"
-                        
-                        # Extrair DIRETAMENTE da Observation, como o enunciado pede
+
                         utente_sns = None
                         subject_identifier = subject.get("identifier", {})
                         if subject_identifier.get("system") == "https://www.sns.gov.pt/utente":
                             utente_sns = subject_identifier.get("value")
-                            
+
                         if not utente_sns:
                             print(f"⚠️ Observation {fhir_obs_id} ignorada: Não tem N.º Utente do SNS no subject.identifier.")
                             continue
-                        # Depois de extrair utente_sns e fhir_patient_id:
+
                         if fhir_patient_id == "Desconhecido" and utente_sns:
-                            # Tentar encontrar o Patient no FHIR pelo N.º de Utente
                             res_pt = requests.get(
                                 f"{FHIR_SERVER_URL}/Patient?identifier=https://www.sns.gov.pt/utente|{utente_sns}",
                                 headers=headers, timeout=5
@@ -475,49 +515,38 @@ async def fhir_polling_worker():
                             if res_pt.status_code == 200:
                                 entries_pt = res_pt.json().get("entry", [])
                                 if entries_pt:
-                                    fhir_patient_id = entries_pt[0]["resource"]["id"]    
-                        # Consultar/Criar EHR 
+                                    fhir_patient_id = entries_pt[0]["resource"]["id"]
+
                         try:
                             ehr_id = get_or_create_ehr(str(utente_sns), str(fhir_patient_id))
                         except Exception as ehr_err:
                             print(f"❌ Erro na Gestão do EHR para o utente {utente_sns}: {ehr_err}")
                             continue
 
-                        # =================================================================
-                        # REQUISITO 4.3: Gestão do Practitioner 
-                        # =================================================================
                         performers = resource.get("performer", [])
                         nome_medico = "Sistema Automático"
                         cedula_profissional = "Desconhecido"
-                        
+
                         if performers:
                             performer = performers[0]
                             performer_ref = performer.get("reference")
-                            
-                            # Fazemos o GET ao Practitioner para obter o Nome e a Cédula reais
                             res_practitioner = requests.get(f"{FHIR_SERVER_URL}/{performer_ref}", headers=headers, timeout=5)
-                            
+
                             if res_practitioner.status_code == 200:
                                 practitioner_data = res_practitioner.json()
-                                # Obter Nome
                                 names = practitioner_data.get("name", [])
                                 if names:
                                     nome_medico = names[0].get("text", "Médico Desconhecido")
-                                
-                                # Obter Cédula (Validando os sistemas da Ordem)
+
                                 for p_ident in practitioner_data.get("identifier", []):
                                     if p_ident.get("system") in ["https://www.ordemdosmedicos.pt", "https://www.ordemenfermeiros.pt"]:
                                         cedula_profissional = p_ident.get("value")
                                         break
-                                
+
                                 print(f"👤 [Practitioner] Profissional identificado: {nome_medico} | Cédula: {cedula_profissional} → será registado como PARTY_IDENTIFIED na composição")
 
-                        # =================================================================
-                        # REQUISITO 4.4: Mapeamento e Submissão da Composição
-                        # =================================================================
-                        # O build_openehr_composition já cria o PartyProxy corretamente
                         composition = build_openehr_composition(resource, nome_medico, str(cedula_profissional))
-                        
+
                         if composition:
                             comp_url = f"{EHRBASE_URL}/ehr/{ehr_id}/composition?templateId=sinais_vitais"
                             comp_headers = {
@@ -525,19 +554,16 @@ async def fhir_polling_worker():
                                 "Accept": "application/json",
                                 "Prefer": "return=representation"
                             }
-                            
-                            res_ehr = requests.post(comp_url, json=composition, auth=None, headers=comp_headers, timeout=5)
+                            res_ehr = requests.post(comp_url, json=composition, auth=None, headers=comp_headers, timeout=10)
                             if res_ehr.status_code in [200, 201]:
                                 print(f"✅ [Polling] Composição gravada no EHRbase! UID: {res_ehr.json().get('uid', {}).get('value')}")
                             else:
                                 print(f"❌ [Polling] EHRbase rejeitou a composição: {res_ehr.text}")
-                                
-                else:
-                    ultima_verificacao = datetime.now(timezone.utc)
+
+            ultima_verificacao = novo_checkpoint
 
         except Exception as err:
             print(f"⚠️ [Polling Worker] Ocorreu uma falha no ciclo: {err}")
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -552,7 +578,8 @@ async def startup_event():
     except Exception:
         print("HAPI FHIR: Servidor offline ou a iniciar.")
 
-    asyncio.create_task(fhir_polling_worker())
+    t = threading.Thread(target=fhir_polling_worker, daemon=True)
+    t.start()
 
 @app.post("/Register")
 async def register(data: dict):

@@ -66,4 +66,4 @@ services:
       - fhir
       - ehrbase
     volumes:
-      - ./templates:/app/templates
+      - ./templates:/code/app/templates

@@ -81,7 +81,6 @@ def validar_recurso_fhir(recurso_json, tipo_recurso):
         return True, f"Validação ignorada: {str(e)}"
 
 def get_or_create_ehr(numero_utente, patient_fhir_id):
-    # Namespace com hífens — único formato aceite pelo regex do EHRbase
     NAMESPACE = "pt-sns-utente"
 
     search_url_sns  = f"{EHRBASE_URL}/ehr?subject_id={numero_utente}&subject_namespace={NAMESPACE}"
@@ -119,7 +118,7 @@ def get_or_create_ehr(numero_utente, patient_fhir_id):
                 "namespace": NAMESPACE,
                 "type": "PERSON"
             }
-        }
+        },
     }
 
     create_res = requests.post(f"{EHRBASE_URL}/ehr", json=payload)
@@ -155,7 +154,7 @@ def upload_template():
         print(f"❌ Erro: O ficheiro {template_path} não existe fisicamente.")
         try:
             arquivos_encontrados = os.listdir(templates_dir)
-            print(f"🔍 Ficheiros que realmente existem dentro de {templates_dir}: {arquivos_encontrados}")
+            print(f"Ficheiros que realmente existem dentro de {templates_dir}: {arquivos_encontrados}")
         except Exception as e:
             print(f"⚠️ Não foi possível listar a pasta de templates: {e}")
         return
@@ -174,9 +173,8 @@ def upload_template():
             print(f"⚠️ EHRbase ainda não responde... ({str(e)}) (Tentativa {i+1}/30)")
         time.sleep(5)
 
-# --- MERGE: Mapeamento baseado no requisito 4.1 do enunciado ---
 MAPA_SINAIS_VITAIS = {
-    # blood_pressure.v2: at0006 é EVENT genérico → POINT_EVENT aceite
+    # blood_pressure.v2
     "8480-6": {
         "nome": "Systolic",
         "archetype": "openEHR-EHR-OBSERVATION.blood_pressure.v2",
@@ -197,7 +195,7 @@ MAPA_SINAIS_VITAIS = {
         "item_node": "at0005",
         "unidade": "mm[Hg]",
     },
-    # pulse.v2: at0003 é INTERVAL_EVENT OBRIGATÓRIO no .opt (width + math_function obrigatórios)
+    # pulse.v2
     "8867-4": {
         "nome": "Rate",
         "archetype": "openEHR-EHR-OBSERVATION.pulse.v2",
@@ -208,7 +206,7 @@ MAPA_SINAIS_VITAIS = {
         "item_node": "at0004",
         "unidade": "/min",
     },
-    # body_temperature.v2: at0003 é EVENT genérico → POINT_EVENT aceite
+    # body_temperature.v2
     "8310-5": {
         "nome": "Temperature",
         "archetype": "openEHR-EHR-OBSERVATION.body_temperature.v2",
@@ -219,7 +217,7 @@ MAPA_SINAIS_VITAIS = {
         "item_node": "at0004",
         "unidade": "Cel",
     },
-    # pulse_oximetry.v1: at0002 é EVENT genérico → POINT_EVENT aceite
+    # pulse_oximetry.v1
     "59408-5": {
         "nome": "SpO2",
         "archetype": "openEHR-EHR-OBSERVATION.pulse_oximetry.v1",
@@ -230,7 +228,7 @@ MAPA_SINAIS_VITAIS = {
         "item_node": "at0006",
         "unidade": "%",
     },
-    # body_weight.v2: at0003 é EVENT genérico → POINT_EVENT aceite
+    # body_weight.v2
     "29463-7": {
         "nome": "Weight",
         "archetype": "openEHR-EHR-OBSERVATION.body_weight.v2",
@@ -241,7 +239,7 @@ MAPA_SINAIS_VITAIS = {
         "item_node": "at0004",
         "unidade": "kg",
     },
-    # respiration.v2: at0002 é EVENT genérico → POINT_EVENT aceite
+    # respiration.v2
     "9279-1": {
         "nome": "Rate",
         "archetype": "openEHR-EHR-OBSERVATION.respiration.v2",
@@ -259,7 +257,6 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
         valor_medicao = fhir_payload['valueQuantity']['value']
         data_execucao = fhir_payload['effectiveDateTime']
 
-        # Determinar o LOINC code
         loinc_code = None
         for coding in fhir_payload.get('code', {}).get('coding', []):
             if coding.get('system') == 'http://loinc.org' or coding.get('system') == 'loinc':
@@ -276,13 +273,10 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
         info = MAPA_SINAIS_VITAIS[loinc_code]
         unidade = fhir_payload['valueQuantity'].get('code', info.get('unidade', '1'))
 
-        # Correção do formato ISO Datetime para aceitar a biblioteca Java do EHRbase
         if data_execucao and data_execucao.endswith('Z'):
             data_execucao = data_execucao.replace('Z', '')
 
-        # Definição do nó de valor dinâmico conforme o tipo exigido pelo Template (Proportion vs Quantity)
         if loinc_code == "59408-5":
-            # Saturação exige DV_PROPORTION (Mapeia o Numerator) para passar no validador
             value_block = {
                 "_type": "DV_PROPORTION",
                 "numerator": float(valor_medicao),
@@ -290,7 +284,6 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
                 "type": 3
             }
         else:
-            # Restantes medições utilizam o clássico DV_QUANTITY
             value_block = {
                 "_type": "DV_QUANTITY",
                 "magnitude": float(valor_medicao),
@@ -304,7 +297,7 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
                 "_type": "PARTY_REF",
                 "id": {
                     "_type": "GENERIC_ID",
-                    "value": str(fhir_medico_id),  # Guarda o ID/Cédula do Practitioner FHIR
+                    "value": str(fhir_medico_id),  
                     "scheme": "fhir"
                 },
                 "namespace": "pt-cedula-profissional",
@@ -328,7 +321,7 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
             "language": {
                 "_type": "CODE_PHRASE",
                 "terminology_id": {"_type": "TERMINOLOGY_ID", "value": "ISO_639-1"},
-                "code_string": "en"   # O template original possui language "en"
+                "code_string": "en"   
             },
             "territory": {
                 "_type": "CODE_PHRASE",
@@ -393,7 +386,6 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
                                 "archetype_node_id": info["event_node"],
                                 "name": {"_type": "DV_TEXT", "value": "Any event"},
                                 "time": {"_type": "DV_DATE_TIME", "value": data_execucao},
-                                # INTERVAL_EVENT (pulse.v2) requer width e math_function obrigatórios
                                 **({
                                     "width": {"_type": "DV_DURATION", "value": "PT0S"},
                                     "math_function": {
@@ -430,13 +422,8 @@ def build_openehr_composition(fhir_payload: dict, nome_medico: str, fhir_medico_
         print(f"❌ Erro crítico ao construir composição openEHR: {e}")
         return None
 
-def _get_hapi_server_time() -> datetime:  # noqa
-    """
-    Obtém o timestamp actual directamente do HAPI FHIR via cabeçalho Date da resposta.
-    Garante que o cursor de polling usa sempre o relógio do servidor HAPI,
-    eliminando desfasamentos entre o relógio do container Docker e o da máquina host.
-    Aplica uma margem de segurança de 5 segundos para trás para cobrir latências de rede.
-    """
+def _get_hapi_server_time() -> datetime:  
+
     try:
         r = requests.get(f"{FHIR_SERVER_URL}/metadata", timeout=5)
         date_header = r.headers.get("Date")
@@ -445,34 +432,30 @@ def _get_hapi_server_time() -> datetime:  # noqa
             server_time = parsedate_to_datetime(date_header)
             return server_time - timedelta(seconds=5)
     except Exception as e:
-        print(f"⚠️ [Polling] Não foi possível obter hora do HAPI — a usar hora local: {e}")
+        print(f"[Polling] Não foi possível obter hora do HAPI. a usar hora local: {e}")
     return datetime.now(timezone.utc) - timedelta(seconds=5)
 
 
 def fhir_polling_worker():
-    """
-    Polling periódico em thread dedicado — evita bloquear o event loop do asyncio.
-    Usa requests síncronos sem interferir com os endpoints FastAPI.
-    """
-    print("⏳ [Polling Worker] Inicializado e em conformidade estrita com o TP02...")
+    #Polling periódico, evita bloquear o event loop do asyncio. Usa requests síncronos sem interferir com os endpoints FastAPI.
+    print("[Polling Worker] Inicializado")
 
-    # Aguardar HAPI FHIR ficar online
     while True:
         try:
             r = requests.get(f"{FHIR_SERVER_URL}/metadata", timeout=3)
             if r.status_code == 200:
-                print("✅ [Polling Worker] HAPI FHIR online — a iniciar polling.")
+                print("[Polling Worker] HAPI FHIR online, a iniciar polling.")
                 break
         except Exception:
             pass
-        print("⏳ [Polling Worker] Aguardando HAPI FHIR...")
+        print("[Polling Worker] A guardar HAPI FHIR...")
         time.sleep(10)
 
     ultima_verificacao = _get_hapi_server_time()
-    print(f"🕐 [Polling] Checkpoint inicial (hora do HAPI): {ultima_verificacao.isoformat()}")
+    print(f"[Polling] Checkpoint inicial (hora do HAPI): {ultima_verificacao.isoformat()}")
 
     while True:
-        time.sleep(15)  # thread blocking — não afecta o event loop
+        time.sleep(15) 
         try:
             iso_time = ultima_verificacao.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
             print(f"🔍 [Polling] A verificar desde: {iso_time}")
@@ -488,7 +471,7 @@ def fhir_polling_worker():
                 entries = bundle.get("entry", [])
 
                 if entries:
-                    print(f"🔔 [Polling] Encontradas {len(entries)} novas Observations no HAPI FHIR!")
+                    print(f"[Polling] Encontradas {len(entries)} novas Observations no HAPI FHIR!")
 
                     for entry in entries:
                         resource = entry.get("resource", {})
@@ -520,7 +503,7 @@ def fhir_polling_worker():
                         try:
                             ehr_id = get_or_create_ehr(str(utente_sns), str(fhir_patient_id))
                         except Exception as ehr_err:
-                            print(f"❌ Erro na Gestão do EHR para o utente {utente_sns}: {ehr_err}")
+                            print(f"Erro na Gestão do EHR para o utente {utente_sns}: {ehr_err}")
                             continue
 
                         performers = resource.get("performer", [])
@@ -758,7 +741,6 @@ async def create_patient(data: dict, current_user: str = Depends(get_current_use
             cur.close()
             conn.close()
 
-# --- MERGE: Rota /Observation ajustada de volta para o endpoint canónico do RM ---
 @app.post("/Observation")
 async def create_observation(data: dict, current_user: str = Depends(get_current_user)):
     print("ALERTA: O pedido da Observation chegou ao meu código Python!")
@@ -767,7 +749,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         obj_codigo = data.get('codigo', {})
         m = data.get('medicao', {})
         
-        # Mapeamos os códigos FHIR primeiro para usar na validação epayload
         lista_codigos_fhir = [
             {
                 "system": c.get('system'),
@@ -800,7 +781,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         local_medico_id = int(performer_string.split('/')[-1]) if '/' in performer_string else None
         
         fhir_medico_id = "Desconhecido"
-        nome_medico = current_user  # Fallback caso não venha nenhum no JSON
+        nome_medico = current_user  
         
         if local_medico_id:
             cur.execute("SELECT fhir_id, nome FROM medicos WHERE id = %s", (local_medico_id,))
@@ -815,8 +796,8 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             "subject": {
                 "reference": f"Patient/{fhir_patient_id}",
                 "identifier": {
-                    "system": "https://www.sns.gov.pt/utente", # O URL exigido pelo enunciado
-                    "value": str(paciente_row['numero_utente'] or local_patient_id) # Para efeitos de teste, usamos o ID local como N.º SNS
+                    "system": "https://www.sns.gov.pt/utente",
+                    "value": str(paciente_row['numero_utente'] or local_patient_id) 
                 }
             },
                 "effectiveDateTime": data.get('dataExecucao'),
@@ -832,7 +813,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
             }
         }
 
-        # Só adiciona a propriedade 'performer' se o Array NÃO estiver vazio
         if local_medico_id:
             fhir_payload["performer"] = [
                 {
@@ -841,12 +821,10 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
                 }
             ]
 
-        # Validamos o recurso FHIR com o payload corrigido
         valido, mensagem = validar_recurso_fhir(fhir_payload, "Observation")
         if not valido:
             raise HTTPException(status_code=400, detail=f"Erro de Schema FHIR: {mensagem}")
         
-        # Persistência relacional SQL Local
         cur.execute(
             """INSERT INTO observacoes (paciente_id, estado, refer, dataExecucao) 
                VALUES (%s, %s, %s, %s) RETURNING id""",
@@ -874,7 +852,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         )
         conn.commit()
 
-        # Envio paralelo para o Servidor HAPI FHIR
         hapi_url = f"{FHIR_SERVER_URL}/Observation"
         headers_fhir = {"Content-Type": "application/fhir+json;charset=utf-8"}
         fhir_obs_id = None
@@ -890,9 +867,6 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
         except Exception as hapi_err:
             print(f"⚠️ Servidor HAPI FHIR offline: {hapi_err}")
 
-        # ---------------------------------------------------------------------
-        # 5. Integração Automática com o openEHR (EHRbase RM canónico)
-        # ---------------------------------------------------------------------
         '''utente_sns = fhir_payload.get('subject', {}).get('identifier', {}).get('value') 
         
         if not utente_sns:
@@ -941,9 +915,7 @@ async def create_observation(data: dict, current_user: str = Depends(get_current
                 detail=f"Erro interno no bloco openEHR: {str(ehr_err)}"
             )'''
 
-# ---------------------------------------------------------------------
-        # 6. Resposta Unificada
-        # ---------------------------------------------------------------------
+
         return {
             "status": "sucesso",
             "id_local_sql": obs_id,

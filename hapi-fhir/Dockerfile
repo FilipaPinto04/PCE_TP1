@@ -2,7 +2,6 @@ FROM python:3.11-slim
 
 WORKDIR /code
 
-# Instalar dependências do sistema para o psycopg2
 RUN apt-get update && apt-get install -y libpq-dev gcc
 
 COPY requirements.txt .

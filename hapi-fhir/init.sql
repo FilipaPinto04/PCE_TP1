@@ -1,4 +1,3 @@
--- --- ESTRUTURA (SCHEMA) ---
 
 CREATE TABLE IF NOT EXISTS usuarios (
     id SERIAL PRIMARY KEY,
@@ -94,10 +93,7 @@ CREATE TABLE IF NOT EXISTS historico (
     consulta_id INT REFERENCES consultas(id) ON DELETE SET NULL
 );
 
--- --- DADOS INICIAIS (SEED) ---
 
--- Insere o utilizador admin padrão para que consigas fazer login na API
--- Username: admin / Password: admin (encriptada em bcrypt)
 INSERT INTO usuarios (username, password_hash)
 VALUES ('admin', '$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6L6s5WrTHotdEdm2')
 ON CONFLICT (username) DO NOTHING;

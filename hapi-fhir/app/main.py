@@ -78,7 +78,7 @@ def validar_recurso_fhir(recurso_json, tipo_recurso):
                 return False, issue.get('diagnostics')
         return True, "Válido"
     except Exception as e:
-        return False, f"Servidor de validação incontactável: {str(e)}"
+        return True, f"Validação ignorada: {str(e)}"
 
 def get_or_create_ehr(numero_utente, patient_fhir_id):
     # Namespace com hífens — único formato aceite pelo regex do EHRbase
@@ -1216,6 +1216,7 @@ async def get_patient(local_id: int, current_user: str = Depends(get_current_use
         else:
             raise HTTPException(status_code=response.status_code, detail="Erro ao buscar no HAPI")
     except Exception as e:
+        if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:

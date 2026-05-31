@@ -1,0 +1,58 @@
+{
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "status": "final",
+          "code": {
+            "coding": [
+              {
+                "system": "http://loinc.org",
+                "code": "8867-4",
+                "display": "Heart rate"
+              }
+            ],
+            "text": "Frequência Cardíaca"
+          },
+          "subject": {
+            "reference": "Patient/1"
+          },
+          "effectiveDateTime": "2026-05-30T14:00:00Z",
+          "valueQuantity": {
+            "value": 78,
+            "unit": "/min",
+            "system": "http://unitsofmeasure.org",
+            "code": "/min"
+          }
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "status": "final",
+          "code": {
+            "coding": [
+              {
+                "system": "http://loinc.org",
+                "code": "59408-5",
+                "display": "Oxygen saturation"
+              }
+            ],
+            "text": "Saturação de Oxigénio"
+          },
+          "subject": {
+            "reference": "Patient/1"
+          },
+          "effectiveDateTime": "2026-05-30T14:00:00Z",
+          "valueQuantity": {
+            "value": 96,
+            "unit": "%",
+            "system": "http://unitsofmeasure.org",
+            "code": "%"
+          }
+        }
+      }
+    ]
+  }
